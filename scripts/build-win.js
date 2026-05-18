@@ -9,7 +9,7 @@ const packagePath = path.join(root, 'package.json');
 const localBuildPath = path.join(root, '.build', 'build-number');
 const buildInfoPath = path.join(root, 'src', 'build-info.json');
 const packageInfo = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
-const version = String(process.env.ALORBACH_BRIDGE_VERSION || packageInfo.version || '1.0.0').replace(/^v/, '');
+const version = String(process.env.ALORBACH_BRIDGE_VERSION || packageInfo.version || '1.0.1').replace(/^v/, '');
 
 function readLocalBuildNumber() {
 	try {

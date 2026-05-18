@@ -3,7 +3,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 const codexBinary = process.env.ALORBACH_CODEX_BINARY || 'codex';
 const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
@@ -80,6 +80,61 @@ function runCodex(args, options = {}) {
 	});
 }
 
+function runCodexAsync(args, options = {}) {
+	const { timeout, ...spawnOptions } = options;
+	return new Promise((resolve) => {
+		let child;
+		let stdout = '';
+		let stderr = '';
+		let spawnError = null;
+		let timedOut = false;
+		try {
+			child = spawn(resolveCodexBinary(), args, {
+				shell: false,
+				windowsHide: true,
+				env: {
+					...process.env,
+					CODEX_HOME: codexHome,
+				},
+				...spawnOptions,
+			});
+		} catch (error) {
+			resolve({ stdout, stderr, status: null, signal: null, error });
+			return;
+		}
+
+		const timer = timeout ? setTimeout(() => {
+			timedOut = true;
+			child.kill();
+		}, timeout) : null;
+
+		if (timer && typeof timer.unref === 'function') {
+			timer.unref();
+		}
+		child.stdout.on('data', (chunk) => {
+			stdout += String(chunk || '');
+		});
+		child.stderr.on('data', (chunk) => {
+			stderr += String(chunk || '');
+		});
+		child.once('error', (error) => {
+			spawnError = error;
+		});
+		child.once('close', (status, signal) => {
+			if (timer) {
+				clearTimeout(timer);
+			}
+			resolve({
+				stdout,
+				stderr,
+				status,
+				signal,
+				error: spawnError || (timedOut ? new Error('Codex CLI execution timed out.') : null),
+			});
+		});
+	});
+}
+
 function checkStatus() {
 	const version = runCodex(['--version']);
 	if (version.error) {
@@ -152,7 +207,7 @@ function messagesToPrompt(messages, maxTokens) {
 	return parts.join('\n');
 }
 
-function chat(payload) {
+async function chat(payload) {
 	const status = checkStatus();
 	if (!status.success) {
 		return status;
@@ -178,7 +233,7 @@ function chat(payload) {
 		args.push('--model', model);
 	}
 	args.push(prompt);
-	const run = runCodex(args, { cwd: tempDir, timeout: Number(process.env.ALORBACH_CODEX_CHAT_TIMEOUT_MS || 600000) });
+	const run = await runCodexAsync(args, { cwd: tempDir, timeout: Number(process.env.ALORBACH_CODEX_CHAT_TIMEOUT_MS || 600000) });
 	const stdout = (run.stdout || '').trim();
 	const stderr = (run.stderr || '').trim();
 	let responseText = '';
@@ -255,7 +310,7 @@ function imagePrompt(payload) {
 	].join('\n');
 }
 
-function images(payload) {
+async function images(payload) {
 	const status = checkStatus();
 	if (!status.success) {
 		return status;
@@ -278,7 +333,7 @@ function images(payload) {
 		outputFile,
 		imagePrompt(payload),
 	];
-	const run = runCodex(args, { cwd: tempDir, timeout: Number(process.env.ALORBACH_CODEX_IMAGE_TIMEOUT_MS || 1800000) });
+	const run = await runCodexAsync(args, { cwd: tempDir, timeout: Number(process.env.ALORBACH_CODEX_IMAGE_TIMEOUT_MS || 1800000) });
 	const after = listGeneratedImages(generatedImagesDir);
 	const newImages = detectNewImage(before, after);
 	const stdout = (run.stdout || '').trim();
@@ -330,5 +385,6 @@ module.exports = {
 	chat,
 	images,
 	models,
+	runCodexAsync,
 	resolveCodexBinary,
 };

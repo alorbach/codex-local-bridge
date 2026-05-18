@@ -31,7 +31,36 @@ function blend(left, right, amount) {
 	return Math.round(left + (right - left) * amount);
 }
 
-function colorFor(size, x, y) {
+const defaultPalette = {
+	top: [88, 240, 255],
+	mid: [91, 124, 255],
+	bottom: [180, 92, 255],
+};
+
+const statePalettes = {
+	active: {
+		top: [65, 245, 171],
+		mid: [39, 174, 255],
+		bottom: [56, 121, 255],
+	},
+	queued: {
+		top: [255, 219, 92],
+		mid: [255, 160, 67],
+		bottom: [247, 107, 28],
+	},
+	error: {
+		top: [255, 116, 116],
+		mid: [239, 68, 68],
+		bottom: [168, 29, 29],
+	},
+	stopped: {
+		top: [190, 198, 210],
+		mid: [107, 119, 140],
+		bottom: [58, 68, 84],
+	},
+};
+
+function colorFor(size, x, y, palette = defaultPalette) {
 	const center = (size - 1) / 2;
 	const dx = x - center;
 	const dy = y - center;
@@ -40,9 +69,9 @@ function colorFor(size, x, y) {
 		return [0, 0, 0, 0];
 	}
 
-	const top = [88, 240, 255];
-	const mid = [91, 124, 255];
-	const bottom = [180, 92, 255];
+	const top = palette.top;
+	const mid = palette.mid;
+	const bottom = palette.bottom;
 	const t = Math.min(1, Math.max(0, (x + y) / (2 * size)));
 	const base = t < 0.55
 		? top.map((value, index) => blend(value, mid[index], t / 0.55))
@@ -71,13 +100,13 @@ function colorFor(size, x, y) {
 	return [Math.round(8 * shade), Math.round(24 * shade), Math.round(39 * shade), 245];
 }
 
-function createPng(size) {
+function createPng(size, palette) {
 	const rows = [];
 	for (let y = 0; y < size; y += 1) {
 		const row = Buffer.alloc(1 + size * 4);
 		row[0] = 0;
 		for (let x = 0; x < size; x += 1) {
-			const [r, g, b, a] = colorFor(size, x, y);
+			const [r, g, b, a] = colorFor(size, x, y, palette);
 			const offset = 1 + x * 4;
 			row[offset] = r;
 			row[offset + 1] = g;
@@ -134,5 +163,8 @@ for (const image of pngs) {
 	fs.writeFileSync(path.join(assetsDir, `icon-${image.size}.png`), image.data);
 }
 fs.writeFileSync(path.join(assetsDir, 'tray-icon.png'), pngs.find((image) => image.size === 32).data);
+for (const [name, palette] of Object.entries(statePalettes)) {
+	fs.writeFileSync(path.join(assetsDir, `tray-${name}.png`), createPng(32, palette));
+}
 fs.writeFileSync(path.join(assetsDir, 'icon.ico'), createIco(pngs));
 process.stdout.write('Generated Local Codex bridge icons.\n');

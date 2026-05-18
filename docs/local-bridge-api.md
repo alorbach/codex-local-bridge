@@ -46,15 +46,32 @@ Example response:
     "login_status": "Logged in ..."
   },
   "bridge": {
-    "version": "1.0.0",
+    "version": "1.0.1",
     "paired_origins": [
       "http://127.0.0.1:8787"
+    ]
+  },
+  "jobs": {
+    "running_count": 1,
+    "queued_count": 0,
+    "max_concurrent": 2,
+    "active": [
+      {
+        "request_id": "request-123",
+        "short_request_id": "request-123",
+        "type": "chat",
+        "model": "codex-local:auto",
+        "status": "running",
+        "elapsed_ms": 1200
+      }
     ]
   }
 }
 ```
 
 `success: false` means the tray bridge is reachable but Codex is missing, not executable, or not logged in for the current Windows user.
+
+`jobs` reports in-memory local bridge activity. It never includes prompt text or message content. `active` contains currently running jobs, while queued and recent entries may also be present for tray/status diagnostics.
 
 ## `POST /v1/pair`
 

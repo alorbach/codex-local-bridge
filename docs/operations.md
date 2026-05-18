@@ -36,6 +36,13 @@ Run the tray app:
 npm start
 ```
 
+Limit local Codex parallelism for a development run:
+
+```powershell
+$env:ALORBACH_CODEX_MAX_CONCURRENT_JOBS = '2'
+npm start
+```
+
 Run the standalone HTTP example:
 
 ```powershell
@@ -67,8 +74,8 @@ Windows builds are written to `dist/`.
 Release artifact names include the semantic version and build number:
 
 ```text
-Codex-Local-Bridge-1.0.0-build.42-win-x64.exe
-Codex-Local-Bridge-1.0.0-build.42-win-x64.zip
+Codex-Local-Bridge-1.0.1-build.42-win-x64.exe
+Codex-Local-Bridge-1.0.1-build.42-win-x64.zip
 ```
 
 Local builds increment `.build/build-number`. GitHub Actions builds use `GITHUB_RUN_NUMBER`.
@@ -78,8 +85,8 @@ Local builds increment `.build/build-number`. GitHub Actions builds use `GITHUB_
 Push a version tag:
 
 ```powershell
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.0.1
+git push origin v1.0.1
 ```
 
 The release workflow:
@@ -103,6 +110,8 @@ Use the tray menu:
 - `Copy diagnostics` copies a JSON diagnostic payload without bearer token values;
 - `Open bridge data folder` opens `%USERPROFILE%\.alorbach-codex-bridge`;
 - `Refresh Codex status` rechecks `codex --version` and `codex login status`.
+
+The tray icon changes color for running, queued, failed, and stopped states. Mouse-over text and the tray menu show running and queued job counts plus request IDs, job types, models, and elapsed time. Prompt and message content are not shown.
 
 Useful direct checks:
 
@@ -140,6 +149,8 @@ Clear the browser's stored token for the origin and pair again. Also check the t
 ### Image request succeeds in Codex but bridge returns no image
 
 The bridge detects new files under `CODEX_HOME\generated_images`. Confirm Codex writes generated images there for the current `CODEX_HOME`.
+
+Image jobs run exclusively even when multiple chat jobs are allowed, because image result detection uses the shared generated-images directory.
 
 ### WordPress retry says duplicate request
 

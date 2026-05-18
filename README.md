@@ -18,6 +18,7 @@ Windows tray companion for Alorbach AI Subscription Gateway. It exposes a secure
 - Stores a per-origin bearer token in the user's bridge state directory.
 - Executes signed Gateway chat jobs through local `codex exec`.
 - Executes signed Gateway image jobs and returns normalized base64 image data.
+- Runs local Codex jobs with bounded parallelism and queues overflow requests.
 - Shows bridge status, Codex login status, paired sites, diagnostics, restart, and unpair actions in the tray menu.
 
 ## Tray Menu
@@ -140,6 +141,28 @@ Execution routes require a JSON envelope containing:
 
 In production, these values come from WordPress Gateway. The bridge checks that they are present, executes Codex, and returns the result to the browser. WordPress validates the one-time token and request hash when the browser completes the job.
 
+`GET /v1/status` also includes current local job activity:
+
+```json
+{
+  "jobs": {
+    "running_count": 1,
+    "queued_count": 0,
+    "max_concurrent": 2,
+    "active": [
+      {
+        "request_id": "request-123",
+        "short_request_id": "request-123",
+        "type": "chat",
+        "model": "codex-local:auto",
+        "status": "running",
+        "elapsed_ms": 1200
+      }
+    ]
+  }
+}
+```
+
 ## Security Model
 
 - The bridge binds only to `127.0.0.1`.
@@ -156,6 +179,7 @@ In production, these values come from WordPress Gateway. The bridge checks that 
 - `ALORBACH_CODEX_BRIDGE_PORT`: bridge port. Default: `8765`.
 - `ALORBACH_CODEX_BINARY`: explicit path to `codex.exe` or another Codex executable.
 - `CODEX_HOME`: Codex profile directory. Default: `%USERPROFILE%\.codex`.
+- `ALORBACH_CODEX_MAX_CONCURRENT_JOBS`: maximum parallel local Codex jobs. Default: `2`.
 - `ALORBACH_CODEX_CHAT_TIMEOUT_MS`: chat timeout. Default: `600000`.
 - `ALORBACH_CODEX_IMAGE_TIMEOUT_MS`: image timeout. Default: `1800000`.
 
@@ -171,8 +195,8 @@ npm run dist:win
 Build output is written to `dist/` and includes build-numbered artifacts:
 
 ```text
-Codex-Local-Bridge-1.0.0-build.42-win-x64.exe
-Codex-Local-Bridge-1.0.0-build.42-win-x64.zip
+Codex-Local-Bridge-1.0.1-build.42-win-x64.exe
+Codex-Local-Bridge-1.0.1-build.42-win-x64.zip
 ```
 
 Local builds increment `.build/build-number`. GitHub Actions builds use `GITHUB_RUN_NUMBER`.
@@ -182,8 +206,8 @@ Local builds increment `.build/build-number`. GitHub Actions builds use `GITHUB_
 Push a version tag to build and publish release assets:
 
 ```powershell
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.0.1
+git push origin v1.0.1
 ```
 
 The release workflow runs icon generation, JavaScript syntax checks, security tests, and Windows packaging before uploading the installer and portable ZIP to a GitHub Release.

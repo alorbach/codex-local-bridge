@@ -2,9 +2,29 @@
 
 const http = require('http');
 const codex = require('./codex');
+const { JobManager, clampMaxConcurrent } = require('./job-manager');
 const security = require('./security');
 
 let pairingCode = security.createPairingCode();
+
+function maxConcurrentJobs() {
+	return clampMaxConcurrent(process.env.ALORBACH_CODEX_MAX_CONCURRENT_JOBS || 2);
+}
+
+function sendJobState(jobManager) {
+	if (process.send) {
+		process.send({ type: 'job-state', jobs: jobManager.snapshot() });
+	}
+}
+
+function createJobManager(options = {}) {
+	let manager = null;
+	manager = new JobManager({
+		maxConcurrent: options.maxConcurrent || maxConcurrentJobs(),
+		onChange: options.onJobState || (() => sendJobState(manager)),
+	});
+	return manager;
+}
 
 function sendJson(res, statusCode, payload, origin) {
 	const headers = {
@@ -21,14 +41,14 @@ function sendJson(res, statusCode, payload, origin) {
 	res.end(JSON.stringify(payload));
 }
 
-function readBody(req) {
+function readBody(req, maxBytes) {
 	return new Promise((resolve, reject) => {
 		let body = '';
 		let size = 0;
 		req.setEncoding('utf8');
 		req.on('data', (chunk) => {
 			size += Buffer.byteLength(chunk, 'utf8');
-			if (size > security.MAX_BODY_BYTES) {
+			if (size > maxBytes) {
 				reject(new Error('Request body is too large.'));
 				req.destroy();
 				return;
@@ -50,56 +70,64 @@ function readBody(req) {
 	});
 }
 
-function exposeOrigin(req) {
-	return security.normalizeOrigin(req.headers.origin || '');
+function exposeOrigin(req, bridgeSecurity) {
+	return bridgeSecurity.normalizeOrigin(req.headers.origin || '');
 }
 
-function pairedOriginForCors(req) {
-	const origin = exposeOrigin(req);
-	return origin && security.getPairing(origin) ? origin : '';
+function pairedOriginForCors(req, bridgeSecurity) {
+	const origin = exposeOrigin(req, bridgeSecurity);
+	return origin && bridgeSecurity.getPairing(origin) ? origin : '';
 }
 
-function requirePairing(req, res) {
-	const origin = exposeOrigin(req);
+function requirePairing(req, res, bridgeSecurity) {
+	const origin = exposeOrigin(req, bridgeSecurity);
 	const token = req.headers['x-alorbach-bridge-token'];
-	if (!origin || !security.validateBridgeToken(origin, token)) {
+	if (!origin || !bridgeSecurity.validateBridgeToken(origin, token)) {
 		sendJson(res, 403, { success: false, message: 'This WordPress origin is not paired with the local Codex bridge.' }, origin);
 		return null;
 	}
 	return origin;
 }
 
-async function route(req, res) {
-	const origin = exposeOrigin(req);
-	if (!security.isLocalAddress(req)) {
+function modelFromPayload(payload, fallback) {
+	return String((payload && payload.model) || fallback || 'codex-local:auto');
+}
+
+async function route(req, res, context) {
+	const bridgeSecurity = context.security;
+	const codexAdapter = context.codex;
+	const jobManager = context.jobManager;
+	const origin = exposeOrigin(req, bridgeSecurity);
+	if (!bridgeSecurity.isLocalAddress(req)) {
 		sendJson(res, 403, { success: false, message: 'Local Codex bridge only accepts localhost requests.' });
 		return;
 	}
 
 	if (req.method === 'OPTIONS') {
-		sendJson(res, 204, {}, origin || pairedOriginForCors(req));
+		sendJson(res, 204, {}, origin || pairedOriginForCors(req, bridgeSecurity));
 		return;
 	}
 
 	const url = new URL(req.url, 'http://127.0.0.1');
 	if (req.method === 'GET' && url.pathname === '/v1/status') {
-		const status = codex.checkStatus();
+		const status = codexAdapter.checkStatus();
 		sendJson(res, status.success ? 200 : 503, {
 			...status,
 			bridge: {
 				version: require('../package.json').version,
-				paired_origins: Object.keys(security.getPairings()),
+				paired_origins: Object.keys(bridgeSecurity.getPairings()),
 			},
-		}, origin || pairedOriginForCors(req));
+			jobs: jobManager.snapshot(),
+		}, origin || pairedOriginForCors(req, bridgeSecurity));
 		return;
 	}
 
 	if (req.method === 'GET' && url.pathname === '/v1/models') {
-		const pairedOrigin = requirePairing(req, res);
+		const pairedOrigin = requirePairing(req, res, bridgeSecurity);
 		if (!pairedOrigin) {
 			return;
 		}
-		sendJson(res, 200, codex.models(), pairedOrigin);
+		sendJson(res, 200, codexAdapter.models(), pairedOrigin);
 		return;
 	}
 
@@ -110,14 +138,14 @@ async function route(req, res) {
 
 	let body;
 	try {
-		body = await readBody(req);
+		body = await readBody(req, bridgeSecurity.MAX_BODY_BYTES || security.MAX_BODY_BYTES);
 	} catch (error) {
 		sendJson(res, 400, { success: false, message: error.message || 'Invalid request.' }, origin);
 		return;
 	}
 
 	if (url.pathname === '/v1/pair') {
-		const safeOrigin = security.normalizeOrigin(body.origin || origin);
+		const safeOrigin = bridgeSecurity.normalizeOrigin(body.origin || origin);
 		if (!safeOrigin) {
 			sendJson(res, 400, { success: false, message: 'A valid WordPress origin is required.' }, origin);
 			return;
@@ -126,9 +154,9 @@ async function route(req, res) {
 			sendJson(res, 403, { success: false, message: 'Pairing code did not match the local tray app.' }, safeOrigin);
 			return;
 		}
-		const token = security.createToken();
-		security.savePairing(safeOrigin, token);
-		pairingCode = security.createPairingCode();
+		const token = bridgeSecurity.createToken();
+		bridgeSecurity.savePairing(safeOrigin, token);
+		pairingCode = bridgeSecurity.createPairingCode();
 		if (process.send) {
 			process.send({ type: 'pairing-code', pairingCode });
 		}
@@ -137,16 +165,16 @@ async function route(req, res) {
 	}
 
 	if (url.pathname === '/v1/unpair') {
-		const pairedOrigin = requirePairing(req, res);
+		const pairedOrigin = requirePairing(req, res, bridgeSecurity);
 		if (!pairedOrigin) {
 			return;
 		}
-		security.removePairing(pairedOrigin);
+		bridgeSecurity.removePairing(pairedOrigin);
 		sendJson(res, 200, { success: true }, pairedOrigin);
 		return;
 	}
 
-	const pairedOrigin = requirePairing(req, res);
+	const pairedOrigin = requirePairing(req, res, bridgeSecurity);
 	if (!pairedOrigin) {
 		return;
 	}
@@ -156,33 +184,49 @@ async function route(req, res) {
 	}
 
 	if (url.pathname === '/v1/chat') {
-		const result = codex.chat(body.payload || {});
+		const result = await jobManager.run({
+			requestId: body.request_id,
+			type: 'chat',
+			model: modelFromPayload(body.payload, 'codex-local:auto'),
+		}, () => codexAdapter.chat(body.payload || {}));
 		sendJson(res, result.success ? 200 : 500, result, pairedOrigin);
 		return;
 	}
 	if (url.pathname === '/v1/images') {
-		const result = codex.images(body.payload || {});
+		const result = await jobManager.run({
+			requestId: body.request_id,
+			type: 'images',
+			model: modelFromPayload(body.payload, 'codex-local:image'),
+		}, () => codexAdapter.images(body.payload || {}));
 		sendJson(res, result.success ? 200 : 500, result, pairedOrigin);
 		return;
 	}
 	sendJson(res, 404, { success: false, message: 'Unknown local bridge route.' }, pairedOrigin);
 }
 
-function createServer() {
-	return http.createServer((req, res) => {
-		route(req, res).catch((error) => {
-			sendJson(res, 500, { success: false, message: error && error.message ? error.message : 'Unexpected bridge failure.' }, exposeOrigin(req));
+function createServer(options = {}) {
+	const context = {
+		codex: options.codex || codex,
+		security: options.security || security,
+		jobManager: options.jobManager || createJobManager(options),
+	};
+	const server = http.createServer((req, res) => {
+		route(req, res, context).catch((error) => {
+			sendJson(res, 500, { success: false, message: error && error.message ? error.message : 'Unexpected bridge failure.' }, exposeOrigin(req, context.security));
 		});
 	});
+	server.jobManager = context.jobManager;
+	return server;
 }
 
 function startServer(options = {}) {
 	const requestedPort = Number(options.port || process.env.ALORBACH_CODEX_BRIDGE_PORT || 8765);
-	const server = createServer();
+	const server = createServer(options);
 	return new Promise((resolve, reject) => {
 		server.once('error', reject);
 		server.listen(requestedPort, '127.0.0.1', () => {
 			server.off('error', reject);
+			sendJobState(server.jobManager);
 			resolve({ server, port: server.address().port, pairingCode });
 		});
 	});
@@ -213,6 +257,7 @@ if (require.main === module) {
 
 module.exports = {
 	createServer,
+	createJobManager,
 	getPairingCode: () => pairingCode,
 	startServer,
 };
