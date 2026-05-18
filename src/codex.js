@@ -81,8 +81,9 @@ function runCodex(args, options = {}) {
 }
 
 function runCodexAsync(args, options = {}) {
-	const { timeout, onOutput, ...spawnOptions } = options;
+	const { timeout, onOutput, input, ...spawnOptions } = options;
 	const emitOutput = typeof onOutput === 'function' ? onOutput : () => {};
+	const stdinInput = typeof input === 'string' || Buffer.isBuffer(input) ? input : null;
 	return new Promise((resolve) => {
 		let child;
 		let stdout = '';
@@ -93,7 +94,7 @@ function runCodexAsync(args, options = {}) {
 			child = spawn(resolveCodexBinary(), args, {
 				shell: false,
 				windowsHide: true,
-				stdio: ['ignore', 'pipe', 'pipe'],
+				stdio: [stdinInput === null ? 'ignore' : 'pipe', 'pipe', 'pipe'],
 				env: {
 					...process.env,
 					CODEX_HOME: codexHome,
@@ -103,6 +104,12 @@ function runCodexAsync(args, options = {}) {
 		} catch (error) {
 			resolve({ stdout, stderr, status: null, signal: null, error });
 			return;
+		}
+		if (stdinInput !== null && child.stdin) {
+			child.stdin.once('error', (error) => {
+				spawnError = spawnError || error;
+			});
+			child.stdin.end(stdinInput);
 		}
 
 		const timer = timeout ? setTimeout(() => {
@@ -197,7 +204,119 @@ function parseUsage(stdout, stderr) {
 	return { total_tokens: 0, local_unmetered: true };
 }
 
-function messagesToPrompt(messages, maxTokens) {
+function imageExtensionForMime(mime) {
+	const normalized = String(mime || '').toLowerCase();
+	if (normalized === 'image/jpeg' || normalized === 'image/jpg') {
+		return 'jpg';
+	}
+	if (normalized === 'image/png') {
+		return 'png';
+	}
+	if (normalized === 'image/webp') {
+		return 'webp';
+	}
+	if (normalized === 'image/gif') {
+		return 'gif';
+	}
+	return 'bin';
+}
+
+function tryWriteDataImage(value, tempDir, index) {
+	if (!tempDir) {
+		return null;
+	}
+	const text = String(value || '').trim();
+	const match = text.match(/^data:(image\/[a-z0-9.+-]+);base64,([\s\S]+)$/i);
+	if (!match) {
+		return null;
+	}
+	const mime = match[1].toLowerCase();
+	const extension = imageExtensionForMime(mime);
+	if (extension === 'bin') {
+		return null;
+	}
+	const base64 = match[2].replace(/\s+/g, '');
+	const bytes = Buffer.from(base64, 'base64');
+	if (!bytes.length) {
+		return null;
+	}
+	const imagePath = path.join(tempDir, `input-image-${index}.${extension}`);
+	fs.writeFileSync(imagePath, bytes);
+	return {
+		bytes: bytes.length,
+		mime,
+		path: imagePath,
+	};
+}
+
+function safeStringifyForPrompt(value) {
+	return JSON.stringify(value, (key, item) => {
+		if (typeof item === 'string' && /^data:image\/[a-z0-9.+-]+;base64,/i.test(item)) {
+			return `[data image omitted from text prompt, ${item.length} chars]`;
+		}
+		return item;
+	});
+}
+
+function imageValueFromPart(part) {
+	if (!part || typeof part !== 'object') {
+		return '';
+	}
+	if (typeof part.image_url === 'string') {
+		return part.image_url;
+	}
+	if (part.image_url && typeof part.image_url === 'object' && typeof part.image_url.url === 'string') {
+		return part.image_url.url;
+	}
+	if (typeof part.url === 'string') {
+		return part.url;
+	}
+	return '';
+}
+
+function contentPartsToPrompt(content, tempDir, attachments) {
+	if (typeof content === 'string') {
+		return content;
+	}
+	if (!Array.isArray(content)) {
+		return safeStringifyForPrompt(content || '');
+	}
+	const lines = [];
+	for (const part of content) {
+		if (typeof part === 'string') {
+			lines.push(part);
+			continue;
+		}
+		if (!part || typeof part !== 'object') {
+			continue;
+		}
+		const type = String(part.type || '').toLowerCase();
+		if (type === 'input_text' || type === 'text') {
+			lines.push(String(part.text || part.content || ''));
+			continue;
+		}
+		if (type === 'input_image' || type === 'image_url') {
+			const imageValue = imageValueFromPart(part);
+			const attachment = tryWriteDataImage(imageValue, tempDir, attachments.length + 1);
+			if (attachment) {
+				attachments.push(attachment);
+				lines.push(`[Attached image ${attachments.length}: ${attachment.mime}, ${attachment.bytes} bytes, passed to Codex as an image attachment.]`);
+			} else if (imageValue && /^data:image\/[a-z0-9.+-]+;base64,/i.test(imageValue)) {
+				lines.push('[Image attachment could not be decoded and was omitted from the text prompt.]');
+			} else if (imageValue) {
+				lines.push(`[Image URL attachment: ${imageValue.slice(0, 512)}]`);
+			} else {
+				lines.push('[Image attachment without readable image data.]');
+			}
+			continue;
+		}
+		lines.push(safeStringifyForPrompt(part));
+	}
+	return lines.filter(Boolean).join('\n');
+}
+
+function buildChatPrompt(messages, maxTokens, tempDir) {
+	const attachments = [];
 	const parts = [
 		'Respond to the following WordPress Gateway chat transcript.',
 		'Do not access local files, run shell commands, or modify the filesystem.',
@@ -206,11 +325,18 @@ function messagesToPrompt(messages, maxTokens) {
 	];
 	for (const message of Array.isArray(messages) ? messages : []) {
 		const role = String(message.role || 'user');
-		const content = typeof message.content === 'string' ? message.content : JSON.stringify(message.content || '');
+		const content = contentPartsToPrompt(message.content, tempDir, attachments);
 		parts.push(`${role.toUpperCase()}: ${content}`);
 	}
 	parts.push('', 'ASSISTANT:');
-	return parts.join('\n');
+	return {
+		attachments,
+		prompt: parts.join('\n'),
+	};
+}
+
+function messagesToPrompt(messages, maxTokens) {
+	return buildChatPrompt(messages, maxTokens, '').prompt;
 }
 
 async function chat(payload, session = {}) {
@@ -225,7 +351,7 @@ async function chat(payload, session = {}) {
 	const model = String(payload.model || 'codex-local:auto').replace(/^codex-local:/, '') || 'auto';
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alorbach-codex-chat-'));
 	const outputFile = path.join(tempDir, 'last-message.txt');
-	const prompt = messagesToPrompt(messages, payload.max_tokens);
+	const { attachments, prompt } = buildChatPrompt(messages, payload.max_tokens, tempDir);
 	const args = [
 		'exec',
 		'--skip-git-repo-check',
@@ -238,8 +364,11 @@ async function chat(payload, session = {}) {
 	if (model !== 'auto') {
 		args.push('--model', model);
 	}
-	args.push(prompt);
-	const run = await runCodexAsync(args, { cwd: tempDir, timeout: Number(process.env.ALORBACH_CODEX_CHAT_TIMEOUT_MS || 600000), onOutput: session.appendSessionOutput });
+	for (const attachment of attachments) {
+		args.push('--image', attachment.path);
+	}
+	args.push('-');
+	const run = await runCodexAsync(args, { cwd: tempDir, timeout: Number(process.env.ALORBACH_CODEX_CHAT_TIMEOUT_MS || 600000), onOutput: session.appendSessionOutput, input: prompt });
 	const stdout = (run.stdout || '').trim();
 	const stderr = (run.stderr || '').trim();
 	let responseText = '';
@@ -337,9 +466,9 @@ async function images(payload, session = {}) {
 		tempDir,
 		'--output-last-message',
 		outputFile,
-		imagePrompt(payload),
+		'-',
 	];
-	const run = await runCodexAsync(args, { cwd: tempDir, timeout: Number(process.env.ALORBACH_CODEX_IMAGE_TIMEOUT_MS || 1800000), onOutput: session.appendSessionOutput });
+	const run = await runCodexAsync(args, { cwd: tempDir, timeout: Number(process.env.ALORBACH_CODEX_IMAGE_TIMEOUT_MS || 1800000), onOutput: session.appendSessionOutput, input: imagePrompt(payload) });
 	const after = listGeneratedImages(generatedImagesDir);
 	const newImages = detectNewImage(before, after);
 	const stdout = (run.stdout || '').trim();
@@ -387,9 +516,11 @@ function models() {
 }
 
 module.exports = {
+	buildChatPrompt,
 	checkStatus,
 	chat,
 	images,
+	messagesToPrompt,
 	models,
 	runCodexAsync,
 	resolveCodexBinary,

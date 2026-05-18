@@ -117,6 +117,10 @@ The tray icon animates while jobs are running and changes color for queued, fail
 
 Failed bridge requests include a `debug_help` object in the JSON response. It points to `/status`, `/v1/status`, the request id when available, and safe checks such as Codex login status, pairing state, and tray diagnostics. The `/status` page auto-refreshes and shows bounded live Codex session output for running jobs, then keeps recent failed jobs with stderr/stdout/last response text when available.
 
+Example status page with local filesystem paths redacted:
+
+![Codex Local Bridge status page with local paths redacted](images/status-page.png)
+
 Useful direct checks:
 
 ```powershell

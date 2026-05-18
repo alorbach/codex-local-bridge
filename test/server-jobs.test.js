@@ -139,7 +139,15 @@ function createMockSecurity() {
 		assert.ok(page.body.includes('white-space: pre-wrap'));
 		assert.ok(page.body.includes('overflow-x: hidden'));
 		assert.ok(page.body.includes('live-session-output'));
-		assert.ok(page.body.includes('scrollTop = output.scrollHeight'));
+		assert.ok(page.body.includes('data-session-key'));
+		assert.ok(page.body.includes('captureSessionOutputScrolls'));
+		assert.ok(page.body.includes('restoreSessionOutputScrolls'));
+		assert.ok(page.body.includes('state.atBottom'));
+		assert.ok(page.body.includes('updateSessionOutput'));
+		assert.ok(page.body.includes('output.appendChild(document.createTextNode'));
+		assert.ok(page.body.includes('copy-session-output'));
+		assert.ok(page.body.includes('navigator.clipboard.writeText'));
+		assert.ok(page.body.includes("button.textContent = 'Copied'"));
 
 		const status = await requestJson(port, 'GET', '/v1/status');
 		assert.strictEqual(status.statusCode, 200);

@@ -42,7 +42,7 @@ Runtime configuration:
 - `ALORBACH_CODEX_CHAT_TIMEOUT_MS`: chat timeout. Defaults to 600000.
 - `ALORBACH_CODEX_IMAGE_TIMEOUT_MS`: image timeout. Defaults to 1800000.
 
-Chat jobs run `codex exec` in an ephemeral temp directory and write the final assistant message to a temp output file. Image jobs run `codex exec`, watch `CODEX_HOME/generated_images`, and return the newest generated image as base64.
+Chat jobs run `codex exec` in an ephemeral temp directory and write the final assistant message to a temp output file. The bridge sends generated Codex instructions through stdin instead of a command-line prompt argument so large WordPress transcripts do not hit Windows process argument length limits. Data URL image attachments in chat content are decoded into temp files and passed with `codex exec --image`, so base64 image payloads do not count as prompt text. Image jobs run `codex exec`, watch `CODEX_HOME/generated_images`, and return the newest generated image as base64.
 
 ### Security state
 

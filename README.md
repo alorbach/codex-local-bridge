@@ -26,6 +26,12 @@ Windows tray companion for Alorbach AI Subscription Gateway. It exposes a secure
 
 ![Codex Local Bridge tray menu](docs/images/tray-menu.png)
 
+## Status Page
+
+Double-click the tray icon or use `Open status page` to open the local status page:
+
+![Codex Local Bridge status page with local paths redacted](docs/images/status-page.png)
+
 ## Requirements
 
 - Windows 10 or later.

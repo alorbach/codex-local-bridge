@@ -126,6 +126,34 @@ function statusPageHtml() {
 			color: var(--muted);
 		}
 		.help-list li { margin: 4px 0; }
+		.session-output-block {
+			min-width: 0;
+		}
+		.session-output-header {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 12px;
+			margin-bottom: 8px;
+		}
+		.copy-session-output {
+			appearance: none;
+			border: 1px solid var(--line);
+			border-radius: 6px;
+			background: var(--panel-2);
+			color: var(--text);
+			cursor: pointer;
+			font: inherit;
+			font-size: 12px;
+			line-height: 1;
+			padding: 7px 10px;
+			white-space: nowrap;
+		}
+		.copy-session-output:hover,
+		.copy-session-output:focus-visible {
+			border-color: var(--info);
+			outline: none;
+		}
 		details.panel {
 			padding: 0;
 		}
@@ -300,43 +328,133 @@ function statusPageHtml() {
 			element.querySelector('span:last-child').textContent = label;
 		}
 
-		function renderRows(jobs) {
-			if (!jobs.length) {
-				return '<tr><td colspan="5" class="muted">No active jobs</td></tr>';
-			}
-			return jobs.map((job) => {
-				const summary = '<tr>' +
-					'<td><code>' + escapeHtml(job.short_request_id || job.request_id || job.id) + '</code></td>' +
-					'<td>' + escapeHtml(job.type) + '</td>' +
-					'<td>' + escapeHtml(job.model) + '</td>' +
-					'<td>' + escapeHtml(job.status) + '</td>' +
-					'<td>' + elapsed(job.elapsed_ms) + '</td>' +
-				'</tr>';
-				if (!job.session_output) {
-					return summary;
-				}
-				return summary + '<tr><td colspan="5"><div class="label">Live Session Output</div><pre class="session-output live-session-output">' + escapeHtml(job.session_output) + '</pre></td></tr>';
-			}).join('');
+		function sessionOutputBlock(label, options = {}) {
+			const live = !!options.live;
+			const key = text(options.key, '');
+			return '<div class="session-output-block">' +
+				'<div class="session-output-header">' +
+					'<div class="label">' + escapeHtml(label) + '</div>' +
+					'<button type="button" class="copy-session-output">Copy</button>' +
+				'</div>' +
+				'<pre class="session-output' + (live ? ' live-session-output' : '') + '" data-session-key="' + escapeHtml(key) + '"></pre>' +
+			'</div>';
 		}
 
-		function renderFailures(jobs) {
-			const failures = jobs.filter((job) => job.status === 'failed');
-			if (!failures.length) {
-				return '<tr><td colspan="5" class="muted">No recent failures</td></tr>';
+		function rowFor(tbody, key, kind) {
+			return Array.from(tbody.querySelectorAll('tr[data-session-row-key]')).find((row) => (
+				row.dataset.sessionRowKey === key && row.dataset.sessionRowKind === kind
+			));
+		}
+
+		function createSessionRow(key, kind) {
+			const row = document.createElement('tr');
+			row.dataset.sessionRowKey = key;
+			row.dataset.sessionRowKind = kind;
+			return row;
+		}
+
+		function jobKey(prefix, job) {
+			return prefix + ':' + text(job.request_id || job.id || job.short_request_id);
+		}
+
+		function activeSummaryCells(job) {
+			return '<td><code>' + escapeHtml(job.short_request_id || job.request_id || job.id) + '</code></td>' +
+				'<td>' + escapeHtml(job.type) + '</td>' +
+				'<td>' + escapeHtml(job.model) + '</td>' +
+				'<td>' + escapeHtml(job.status) + '</td>' +
+				'<td>' + elapsed(job.elapsed_ms) + '</td>';
+		}
+
+		function failureSummaryCells(job) {
+			return '<td><code>' + escapeHtml(job.short_request_id || job.request_id || job.id) + '</code></td>' +
+				'<td>' + escapeHtml(job.type) + '</td>' +
+				'<td>' + escapeHtml(job.model) + '</td>' +
+				'<td>' + escapeHtml(job.error_message || 'Request failed') + '</td>' +
+				'<td>' + (job.finished_at ? new Date(job.finished_at).toLocaleTimeString() : '-') + '</td>';
+		}
+
+		function updateSessionOutput(output, nextValue) {
+			const next = text(nextValue, '');
+			const current = output.textContent || '';
+			if (next === current) {
+				return;
 			}
-			return failures.map((job) => {
-				const summary = '<tr>' +
-					'<td><code>' + escapeHtml(job.short_request_id || job.request_id || job.id) + '</code></td>' +
-					'<td>' + escapeHtml(job.type) + '</td>' +
-					'<td>' + escapeHtml(job.model) + '</td>' +
-					'<td>' + escapeHtml(job.error_message || 'Request failed') + '</td>' +
-					'<td>' + (job.finished_at ? new Date(job.finished_at).toLocaleTimeString() : '-') + '</td>' +
-				'</tr>';
-				if (!job.session_output) {
-					return summary;
+			if (next.startsWith(current)) {
+				output.appendChild(document.createTextNode(next.slice(current.length)));
+				return;
+			}
+			output.textContent = next;
+		}
+
+		function renderJobTable(tbody, jobs, options) {
+			const visibleJobs = options.filter ? jobs.filter(options.filter) : jobs;
+			if (!visibleJobs.length) {
+				tbody.innerHTML = '<tr><td colspan="5" class="muted">' + escapeHtml(options.emptyText) + '</td></tr>';
+				return;
+			}
+
+			const wanted = new Set();
+			Array.from(tbody.children).forEach((row) => {
+				if (!row.dataset.sessionRowKey) {
+					row.remove();
 				}
-				return summary + '<tr><td colspan="5"><div class="label">Session Output</div><pre class="session-output">' + escapeHtml(job.session_output) + '</pre></td></tr>';
-			}).join('');
+			});
+
+			for (const job of visibleJobs) {
+				const key = jobKey(options.keyPrefix, job);
+				wanted.add(key);
+
+				let summaryRow = rowFor(tbody, key, 'summary');
+				if (!summaryRow) {
+					summaryRow = createSessionRow(key, 'summary');
+				}
+				summaryRow.innerHTML = options.summaryCells(job);
+				tbody.appendChild(summaryRow);
+
+				let outputRow = rowFor(tbody, key, 'output');
+				if (job.session_output) {
+					if (!outputRow) {
+						outputRow = createSessionRow(key, 'output');
+						outputRow.innerHTML = '<td colspan="5">' + sessionOutputBlock(options.outputLabel, {
+							live: !!options.live,
+							key,
+						}) + '</td>';
+					}
+					tbody.appendChild(outputRow);
+					const output = outputRow.querySelector('.session-output');
+					if (output) {
+						updateSessionOutput(output, job.session_output);
+					}
+				} else if (outputRow) {
+					outputRow.remove();
+				}
+			}
+
+			Array.from(tbody.querySelectorAll('tr[data-session-row-key]')).forEach((row) => {
+				if (!wanted.has(row.dataset.sessionRowKey)) {
+					row.remove();
+				}
+			});
+		}
+
+		function renderActiveJobs(jobs) {
+			renderJobTable(fields.activeJobs, jobs, {
+				emptyText: 'No active jobs',
+				keyPrefix: 'active',
+				live: true,
+				outputLabel: 'Live Session Output',
+				summaryCells: activeSummaryCells,
+			});
+		}
+
+		function renderRecentFailures(jobs) {
+			renderJobTable(fields.recentFailures, jobs, {
+				emptyText: 'No recent failures',
+				filter: (job) => job.status === 'failed',
+				keyPrefix: 'failed',
+				outputLabel: 'Session Output',
+				summaryCells: failureSummaryCells,
+			});
 		}
 
 		function renderDetails(details) {
@@ -351,21 +469,83 @@ function statusPageHtml() {
 			return rows.map(([label, value]) => '<tr><th>' + escapeHtml(label) + '</th><td><code>' + escapeHtml(value) + '</code></td></tr>').join('');
 		}
 
-		function followLiveSessionOutput() {
-			fields.activeJobs.querySelectorAll('.live-session-output').forEach((output) => {
-				output.scrollTop = output.scrollHeight;
+		function captureSessionOutputScrolls() {
+			const states = new Map();
+			document.querySelectorAll('.session-output[data-session-key]').forEach((output) => {
+				const maxScrollTop = Math.max(0, output.scrollHeight - output.clientHeight);
+				states.set(output.dataset.sessionKey, {
+					atBottom: maxScrollTop - output.scrollTop <= 8,
+					scrollTop: output.scrollTop,
+				});
+			});
+			return states;
+		}
+
+		function restoreSessionOutputScrolls(scrollStates) {
+			document.querySelectorAll('.session-output[data-session-key]').forEach((output) => {
+				const state = scrollStates.get(output.dataset.sessionKey);
+				const maxScrollTop = Math.max(0, output.scrollHeight - output.clientHeight);
+				if (state) {
+					output.scrollTop = output.classList.contains('live-session-output') && state.atBottom
+						? maxScrollTop
+						: Math.min(state.scrollTop, maxScrollTop);
+					return;
+				}
+				if (output.classList.contains('live-session-output')) {
+					output.scrollTop = maxScrollTop;
+				}
 			});
 		}
 
-		function queueFollowLiveSessionOutput() {
+		function queueRestoreSessionOutputScrolls(scrollStates) {
+			const restore = () => restoreSessionOutputScrolls(scrollStates);
 			if (typeof requestAnimationFrame === 'function') {
-				requestAnimationFrame(followLiveSessionOutput);
+				requestAnimationFrame(restore);
 				return;
 			}
-			setTimeout(followLiveSessionOutput, 0);
+			setTimeout(restore, 0);
 		}
 
+		async function copyToClipboard(value) {
+			if (navigator.clipboard && navigator.clipboard.writeText) {
+				await navigator.clipboard.writeText(value);
+				return;
+			}
+			const textarea = document.createElement('textarea');
+			textarea.value = value;
+			textarea.setAttribute('readonly', '');
+			textarea.style.position = 'fixed';
+			textarea.style.left = '-9999px';
+			document.body.appendChild(textarea);
+			textarea.select();
+			document.execCommand('copy');
+			textarea.remove();
+		}
+
+		document.addEventListener('click', async (event) => {
+			const button = event.target.closest('.copy-session-output');
+			if (!button) {
+				return;
+			}
+			const block = button.closest('.session-output-block');
+			const output = block ? block.querySelector('.session-output') : null;
+			if (!output) {
+				return;
+			}
+			const original = button.textContent;
+			try {
+				await copyToClipboard(output.textContent || '');
+				button.textContent = 'Copied';
+			} catch (error) {
+				button.textContent = 'Copy failed';
+			}
+			setTimeout(() => {
+				button.textContent = original;
+			}, 1800);
+		});
+
 		function renderStatus(payload, ok) {
+			const scrollStates = captureSessionOutputScrolls();
 			const jobs = payload.jobs || {};
 			const bridge = payload.bridge || {};
 			const details = payload.details || {};
@@ -375,13 +555,13 @@ function statusPageHtml() {
 			fields.jobCounts.textContent = 'Running ' + Number(jobs.running_count || 0) + ' / Queued ' + Number(jobs.queued_count || 0);
 			fields.version.textContent = text(bridge.version);
 			fields.maxConcurrent.textContent = text(jobs.max_concurrent);
-			fields.activeJobs.innerHTML = renderRows(Array.isArray(jobs.active) ? jobs.active : []);
-			fields.recentFailures.innerHTML = renderFailures(Array.isArray(jobs.recent) ? jobs.recent : []);
+			renderActiveJobs(Array.isArray(jobs.active) ? jobs.active : []);
+			renderRecentFailures(Array.isArray(jobs.recent) ? jobs.recent : []);
 			fields.pairedSites.innerHTML = paired.length ? paired.map((origin) => '<code>' + escapeHtml(origin) + '</code>').join(' ') : '<span class="muted">None</span>';
 			fields.codexDetails.innerHTML = renderDetails(details);
 			fields.rawStatus.textContent = JSON.stringify(payload, null, 2);
 			fields.updated.textContent = 'Auto-refresh on - updated ' + new Date().toLocaleTimeString();
-			queueFollowLiveSessionOutput();
+			queueRestoreSessionOutputScrolls(scrollStates);
 		}
 
 		async function refresh() {
