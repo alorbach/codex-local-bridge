@@ -98,8 +98,9 @@ The release workflow:
 5. syntax-checks JavaScript files;
 6. runs tests;
 7. builds the Windows installer and portable ZIP;
-8. generates a release description with download names, validation context, and GitHub's generated change entries;
-9. publishes a GitHub Release with that description and the generated assets.
+8. generates a release description with download names, validation context, and an embedded changelog from GitHub's generated change entries;
+9. removes older installer and ZIP assets from an existing release for the same tag;
+10. publishes a GitHub Release with that description and only the current build's installer and portable ZIP assets.
 
 ## Diagnostics
 
@@ -116,7 +117,7 @@ Use the tray menu:
 
 The tray icon animates while jobs are running and changes color for queued, failed, and stopped states. Mouse-over text and the tray menu show running and queued job counts plus request IDs, job types, models, and elapsed time. Prompt and message content are not shown.
 
-Failed bridge requests include a `debug_help` object in the JSON response. It points to `/status`, `/v1/status`, the request id when available, and safe checks such as Codex login status, pairing state, and tray diagnostics. The `/status` page auto-refreshes and shows bounded live Codex session output for running jobs, then keeps recent failed jobs with stderr/stdout/last response text when available.
+Failed bridge requests include a `debug_help` object in the JSON response. It points to `/status`, `/v1/status`, the request id when available, and safe checks such as Codex login status, pairing state, and tray diagnostics. The `/status` page uses a local job event stream to append bounded live Codex session output for running jobs, then keeps recent failed jobs with stderr/stdout/last response text when available.
 
 Example status page with local filesystem paths redacted:
 

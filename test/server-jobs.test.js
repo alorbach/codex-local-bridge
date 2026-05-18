@@ -134,6 +134,9 @@ function createMockSecurity() {
 		assert.ok(page.contentType.includes('text/html'));
 		assert.ok(page.body.includes('Codex Local Bridge'));
 		assert.ok(page.body.includes('/v1/status'));
+		assert.ok(page.body.includes('/v1/status/events'));
+		assert.ok(page.body.includes('new EventSource(jobEventsUrl)'));
+		assert.ok(page.body.includes('startFallbackPolling'));
 		assert.ok(page.body.includes('<details class="panel span-12">'));
 		assert.ok(page.body.includes('<summary>Raw Status</summary>'));
 		assert.ok(page.body.includes('white-space: pre-wrap'));
@@ -148,6 +151,7 @@ function createMockSecurity() {
 		assert.ok(page.body.includes('copy-session-output'));
 		assert.ok(page.body.includes('navigator.clipboard.writeText'));
 		assert.ok(page.body.includes("button.textContent = 'Copied'"));
+		assert.ok(!page.body.includes('setInterval(refresh, 2000)'));
 
 		const status = await requestJson(port, 'GET', '/v1/status');
 		assert.strictEqual(status.statusCode, 200);
@@ -160,6 +164,43 @@ function createMockSecurity() {
 		assert.ok(serializedState.includes('request-1'));
 		assert.ok(serializedState.includes('codex-local:gpt-5.4'));
 		assert.ok(!serializedState.includes('secret prompt'));
+
+		const streamPayload = await new Promise((resolve, reject) => {
+			let done = false;
+			const timer = setTimeout(() => {
+				if (done) {
+					return;
+				}
+				done = true;
+				req.destroy();
+				reject(new Error('Timed out waiting for status events.'));
+			}, 2000);
+			const req = http.get({ hostname: '127.0.0.1', port, path: '/v1/status/events' }, (res) => {
+				let raw = '';
+				res.setEncoding('utf8');
+				res.on('data', (chunk) => {
+					raw += chunk;
+					const match = raw.match(/event: jobs\ndata: (.+)\n\n/);
+					if (match && !done) {
+						done = true;
+						clearTimeout(timer);
+						req.destroy();
+						resolve({ statusCode: res.statusCode, contentType: res.headers['content-type'], body: JSON.parse(match[1]) });
+					}
+				});
+			});
+			req.on('error', (error) => {
+				if (!done && error.code !== 'ECONNRESET') {
+					done = true;
+					clearTimeout(timer);
+					reject(error);
+				}
+			});
+		});
+		assert.strictEqual(streamPayload.statusCode, 200);
+		assert.ok(streamPayload.contentType.includes('text/event-stream'));
+		assert.strictEqual(streamPayload.body.running_count, 2);
+		assert.strictEqual(streamPayload.body.queued_count, 1);
 
 		pending[1].resolve({ success: true, response: { id: 'second' } });
 		const secondResult = await second;

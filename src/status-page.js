@@ -288,6 +288,10 @@ function statusPageHtml() {
 	</main>
 	<script>
 		const statusUrl = '/v1/status';
+		const jobEventsUrl = '/v1/status/events';
+		let currentStatus = {};
+		let fallbackPollTimer = null;
+		let jobEvents = null;
 		const fields = {
 			updated: document.getElementById('updated'),
 			bridgePill: document.getElementById('bridgePill'),
@@ -544,24 +548,30 @@ function statusPageHtml() {
 			}, 1800);
 		});
 
-		function renderStatus(payload, ok) {
+		function renderJobs(jobs) {
 			const scrollStates = captureSessionOutputScrolls();
+			fields.jobCounts.textContent = 'Running ' + Number(jobs.running_count || 0) + ' / Queued ' + Number(jobs.queued_count || 0);
+			fields.maxConcurrent.textContent = text(jobs.max_concurrent);
+			renderActiveJobs(Array.isArray(jobs.active) ? jobs.active : []);
+			renderRecentFailures(Array.isArray(jobs.recent) ? jobs.recent : []);
+			currentStatus.jobs = jobs;
+			fields.rawStatus.textContent = JSON.stringify(currentStatus, null, 2);
+			fields.updated.textContent = 'Live updates on - updated ' + new Date().toLocaleTimeString();
+			queueRestoreSessionOutputScrolls(scrollStates);
+		}
+
+		function renderStatus(payload, ok) {
+			currentStatus = payload;
 			const jobs = payload.jobs || {};
 			const bridge = payload.bridge || {};
 			const details = payload.details || {};
 			const paired = Array.isArray(bridge.paired_origins) ? bridge.paired_origins : [];
 			setPill(fields.bridgePill, ok ? 'ok' : 'bad', ok ? 'Reachable' : 'Error');
 			setPill(fields.codexPill, payload.success ? 'ok' : 'warn', payload.success ? 'Ready' : 'Needs attention');
-			fields.jobCounts.textContent = 'Running ' + Number(jobs.running_count || 0) + ' / Queued ' + Number(jobs.queued_count || 0);
 			fields.version.textContent = text(bridge.version);
-			fields.maxConcurrent.textContent = text(jobs.max_concurrent);
-			renderActiveJobs(Array.isArray(jobs.active) ? jobs.active : []);
-			renderRecentFailures(Array.isArray(jobs.recent) ? jobs.recent : []);
 			fields.pairedSites.innerHTML = paired.length ? paired.map((origin) => '<code>' + escapeHtml(origin) + '</code>').join(' ') : '<span class="muted">None</span>';
 			fields.codexDetails.innerHTML = renderDetails(details);
-			fields.rawStatus.textContent = JSON.stringify(payload, null, 2);
-			fields.updated.textContent = 'Auto-refresh on - updated ' + new Date().toLocaleTimeString();
-			queueRestoreSessionOutputScrolls(scrollStates);
+			renderJobs(jobs);
 		}
 
 		async function refresh() {
@@ -574,8 +584,37 @@ function statusPageHtml() {
 			}
 		}
 
-		refresh();
-		setInterval(refresh, 2000);
+		function startFallbackPolling() {
+			if (fallbackPollTimer) {
+				return;
+			}
+			fields.updated.textContent = 'Live updates unavailable - polling';
+			fallbackPollTimer = setInterval(refresh, 5000);
+		}
+
+		function connectJobEvents() {
+			if (!window.EventSource) {
+				startFallbackPolling();
+				return;
+			}
+			jobEvents = new EventSource(jobEventsUrl);
+			jobEvents.addEventListener('jobs', (event) => {
+				try {
+					renderJobs(JSON.parse(event.data || '{}'));
+				} catch (error) {}
+			});
+			jobEvents.onerror = () => {
+				if (jobEvents) {
+					jobEvents.close();
+					jobEvents = null;
+				}
+				startFallbackPolling();
+			};
+		}
+
+		refresh().then(connectJobEvents).catch(() => {
+			startFallbackPolling();
+		});
 	</script>
 </body>
 </html>`;

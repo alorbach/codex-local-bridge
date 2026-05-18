@@ -29,7 +29,7 @@ The maximum JSON request body is 12 MiB. This is intended to support normal chat
 
 ## `GET /status`
 
-Shows a minimal local HTML status page for the same runtime data exposed by `GET /v1/status`. The page auto-refreshes and shows bounded live Codex session output for running jobs. The tray app opens this page when the tray icon is double-clicked.
+Shows a minimal local HTML status page for the same runtime data exposed by `GET /v1/status`. The page uses the local job event stream to append bounded live Codex session output for running jobs without repeatedly reloading the full status payload. The tray app opens this page when the tray icon is double-clicked.
 
 ## `GET /v1/status`
 
@@ -76,6 +76,10 @@ Example response:
 `success: false` means the tray bridge is reachable but Codex is missing, not executable, or not logged in for the current Windows user.
 
 `jobs` reports in-memory local bridge activity. It never includes prompt text or message content. `active` contains currently running jobs, while queued and recent entries may also be present for tray/status diagnostics.
+
+## `GET /v1/status/events`
+
+Streams job-state updates as server-sent events for the local status page. This route does not require pairing and emits `jobs` events whose JSON payload matches the `jobs` object from `GET /v1/status`.
 
 ## `POST /v1/pair`
 

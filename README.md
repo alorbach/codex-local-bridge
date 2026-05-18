@@ -122,6 +122,7 @@ Routes:
 
 - `GET /status`: minimal visual bridge status page.
 - `GET /v1/status`: local bridge and Codex readiness.
+- `GET /v1/status/events`: local job-state event stream used by the status page.
 - `POST /v1/pair`: exchange tray pairing code for an origin token.
 - `POST /v1/unpair`: remove the pairing for the request origin.
 - `GET /v1/models`: list paired local model IDs.
@@ -220,7 +221,7 @@ git tag v1.0.1
 git push origin v1.0.1
 ```
 
-The release workflow runs icon generation, JavaScript syntax checks, tests, and Windows packaging before uploading the installer and portable ZIP to a GitHub Release. It also generates the release description automatically with download names, validation context, and GitHub's generated change entries for the tag.
+The release workflow runs icon generation, JavaScript syntax checks, tests, and Windows packaging before uploading the installer and portable ZIP to a GitHub Release. It also generates the release description automatically with download names, validation context, and an embedded changelog from GitHub's generated change entries for the tag. If the workflow is rerun for the same tag, older installer and ZIP assets for that tag are removed so only the latest build remains attached.
 
 ## License
 

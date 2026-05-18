@@ -20,7 +20,15 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}" -replace '^v', ''
+          $buildNumber = $env:GITHUB_RUN_NUMBER
+          $installerName = "Codex-Local-Bridge-$version-build.$buildNumber-win-x64.exe"
+          $zipName = "Codex-Local-Bridge-$version-build.$buildNumber-win-x64.zip"
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "build_number=$buildNumber" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "installer_name=$installerName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "zip_name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "installer_path=dist/$installerName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "zip_path=dist/$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -56,6 +64,9 @@ jobs:
         uses: actions/github-script@v7
         env:
           RELEASE_VERSION: ${{ steps.vars.outputs.version }}
+          RELEASE_BUILD_NUMBER: ${{ steps.vars.outputs.build_number }}
+          RELEASE_INSTALLER_NAME: ${{ steps.vars.outputs.installer_name }}
+          RELEASE_ZIP_NAME: ${{ steps.vars.outputs.zip_name }}
         with:
           script: |
             const fs = require('fs');
@@ -63,7 +74,9 @@ jobs:
 
             const tagName = context.ref.replace('refs/tags/', '');
             const version = process.env.RELEASE_VERSION || tagName.replace(/^v/, '');
-            const buildNumber = process.env.GITHUB_RUN_NUMBER || '1';
+            const buildNumber = process.env.RELEASE_BUILD_NUMBER || process.env.GITHUB_RUN_NUMBER || '1';
+            const installerName = process.env.RELEASE_INSTALLER_NAME || `Codex-Local-Bridge-${version}-build.${buildNumber}-win-x64.exe`;
+            const zipName = process.env.RELEASE_ZIP_NAME || `Codex-Local-Bridge-${version}-build.${buildNumber}-win-x64.zip`;
             const notes = await github.rest.repos.generateReleaseNotes({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -71,6 +84,7 @@ jobs:
               target_commitish: context.sha,
             });
             const generatedBody = String(notes.data.body || '').trim();
+            const changelog = generatedBody || 'No generated changelog entries were returned for this tag.';
             const body = [
               `# Codex Local Bridge ${tagName}`,
               '',
@@ -78,21 +92,41 @@ jobs:
               '',
               '## Downloads',
               '',
-              `- Windows installer: \`Codex-Local-Bridge-${version}-build.${buildNumber}-win-x64.exe\``,
-              `- Portable ZIP: \`Codex-Local-Bridge-${version}-build.${buildNumber}-win-x64.zip\``,
+              `- Windows installer: \`${installerName}\``,
+              `- Portable ZIP: \`${zipName}\``,
               '',
               '## Validation',
               '',
               'This release was built by GitHub Actions after icon generation, JavaScript syntax checks, tests, and Windows packaging completed successfully.',
               '',
-              '## Changes',
+              '## Changelog',
               '',
-              generatedBody || 'No generated changelog entries were returned for this tag.',
+              changelog,
               '',
             ].join('\n');
 
             fs.mkdirSync('dist', { recursive: true });
             fs.writeFileSync(path.join('dist', 'release-notes.md'), body);
+
+      - name: Remove previous build assets for this tag
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $repo = "${{ github.repository }}"
+          $releaseJson = gh release view $tag --repo $repo --json assets 2>$null
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($releaseJson)) {
+            Write-Host "No existing release assets to remove for $tag."
+            exit 0
+          }
+          $release = $releaseJson | ConvertFrom-Json
+          foreach ($asset in $release.assets) {
+            if ($asset.name -match '^Codex-Local-Bridge-.+-win-x64\.(exe|zip)$') {
+              Write-Host "Removing old release asset $($asset.name)"
+              gh release delete-asset $tag $asset.name --repo $repo --yes
+            }
+          }
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -102,5 +136,5 @@ jobs:
           body_path: dist/release-notes.md
           fail_on_unmatched_files: true
           files: |
-            dist/*.exe
-            dist/*.zip
+            ${{ steps.vars.outputs.installer_path }}
+            ${{ steps.vars.outputs.zip_path }}

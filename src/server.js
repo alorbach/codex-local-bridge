@@ -19,6 +19,41 @@ function sendJobState(jobManager) {
 	}
 }
 
+function sendJobStateSnapshot(snapshot) {
+	if (process.send) {
+		process.send({ type: 'job-state', jobs: snapshot });
+	}
+}
+
+function createStatusEvents() {
+	const clients = new Set();
+	return {
+		add(res, initialJobs) {
+			clients.add(res);
+			res.writeHead(200, {
+				'Content-Type': 'text/event-stream; charset=utf-8',
+				'Cache-Control': 'no-store, no-transform',
+				Connection: 'keep-alive',
+				'X-Accel-Buffering': 'no',
+			});
+			res.write('retry: 3000\n\n');
+			this.send(res, 'jobs', initialJobs);
+			res.on('close', () => {
+				clients.delete(res);
+			});
+		},
+		broadcast(event, payload) {
+			for (const res of clients) {
+				this.send(res, event, payload);
+			}
+		},
+		send(res, event, payload) {
+			res.write(`event: ${event}\n`);
+			res.write(`data: ${JSON.stringify(payload)}\n\n`);
+		},
+	};
+}
+
 function createJobManager(options = {}) {
 	let manager = null;
 	manager = new JobManager({
@@ -144,6 +179,11 @@ async function route(req, res, context) {
 		return;
 	}
 
+	if (req.method === 'GET' && url.pathname === '/v1/status/events') {
+		context.statusEvents.add(res, jobManager.snapshot());
+		return;
+	}
+
 	if (req.method === 'GET' && url.pathname === '/v1/models') {
 		const pairedOrigin = requirePairing(req, res, bridgeSecurity);
 		if (!pairedOrigin) {
@@ -235,10 +275,20 @@ async function route(req, res, context) {
 }
 
 function createServer(options = {}) {
+	const statusEvents = createStatusEvents();
+	const onJobState = (snapshot) => {
+		if (typeof options.onJobState === 'function') {
+			options.onJobState(snapshot);
+		} else {
+			sendJobStateSnapshot(snapshot);
+		}
+		statusEvents.broadcast('jobs', snapshot);
+	};
 	const context = {
 		codex: options.codex || codex,
 		security: options.security || security,
-		jobManager: options.jobManager || createJobManager(options),
+		jobManager: options.jobManager || createJobManager({ ...options, onJobState }),
+		statusEvents,
 	};
 	const server = http.createServer((req, res) => {
 		route(req, res, context).catch((error) => {
