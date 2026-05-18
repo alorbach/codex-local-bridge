@@ -98,7 +98,8 @@ The release workflow:
 5. syntax-checks JavaScript files;
 6. runs tests;
 7. builds the Windows installer and portable ZIP;
-8. publishes a GitHub Release with the generated assets.
+8. generates a release description with download names, validation context, and GitHub's generated change entries;
+9. publishes a GitHub Release with that description and the generated assets.
 
 ## Diagnostics
 

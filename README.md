@@ -220,7 +220,7 @@ git tag v1.0.1
 git push origin v1.0.1
 ```
 
-The release workflow runs icon generation, JavaScript syntax checks, security tests, and Windows packaging before uploading the installer and portable ZIP to a GitHub Release.
+The release workflow runs icon generation, JavaScript syntax checks, tests, and Windows packaging before uploading the installer and portable ZIP to a GitHub Release. It also generates the release description automatically with download names, validation context, and GitHub's generated change entries for the tag.
 
 ## License
 
