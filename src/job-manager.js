@@ -10,6 +10,29 @@ function shortRequestId(value) {
 	return text.length > 18 ? `${text.slice(0, 8)}...${text.slice(-6)}` : text;
 }
 
+function truncateOutput(value, maxLength = 12000) {
+	const text = String(value || '').trim();
+	if (text.length <= maxLength) {
+		return text;
+	}
+	return `${text.slice(0, 6000)}\n\n...[truncated ${text.length - maxLength} chars]...\n\n${text.slice(-6000)}`;
+}
+
+function collectSessionOutput(failure) {
+	const details = failure && failure.details && typeof failure.details === 'object' ? failure.details : {};
+	const sections = [];
+	for (const key of ['error', 'stderr', 'stdout', 'response_text', 'generated_images_dir']) {
+		const value = details[key];
+		if (value) {
+			sections.push(`${key.toUpperCase()}:\n${String(value).trim()}`);
+		}
+	}
+	if (!sections.length && failure && failure.error && failure.error.message) {
+		sections.push(`ERROR:\n${failure.error.message}`);
+	}
+	return truncateOutput(sections.join('\n\n'));
+}
+
 class JobManager {
 	constructor(options = {}) {
 		this.maxConcurrent = clampMaxConcurrent(options.maxConcurrent);
@@ -35,6 +58,8 @@ class JobManager {
 			createdAt: now,
 			startedAt: 0,
 			finishedAt: 0,
+			lastOutputEmitAt: 0,
+			sessionOutput: '',
 			runner,
 		};
 
@@ -80,9 +105,11 @@ class JobManager {
 		this.emitChange();
 
 		Promise.resolve()
-			.then(() => job.runner())
+			.then(() => job.runner({
+				appendSessionOutput: (stream, chunk) => this.appendSessionOutput(job, stream, chunk),
+			}))
 			.then((result) => {
-				this.finish(job, result && result.success === false ? 'failed' : 'completed');
+				this.finish(job, result && result.success === false ? 'failed' : 'completed', result);
 				job.resolve(result);
 			})
 			.catch((error) => {
@@ -91,11 +118,39 @@ class JobManager {
 			});
 	}
 
-	finish(job, status, error) {
+	appendSessionOutput(job, stream, chunk) {
+		const text = String(chunk || '').trim();
+		if (!text) {
+			return;
+		}
+		const label = String(stream || 'output').toUpperCase();
+		const next = job.sessionOutput
+			? `${job.sessionOutput}\n\n${label}:\n${text}`
+			: `${label}:\n${text}`;
+		job.sessionOutput = truncateOutput(next);
+		const now = this.now();
+		if (!job.lastOutputEmitAt || now - job.lastOutputEmitAt >= 500) {
+			job.lastOutputEmitAt = now;
+			this.emitChange();
+		}
+	}
+
+	finish(job, status, failure) {
 		this.running.delete(job.id);
 		job.status = status;
 		job.finishedAt = this.now();
-		job.errorMessage = error && error.message ? error.message : '';
+		job.errorMessage = failure && failure.message ? String(failure.message) : '';
+		if (!job.errorMessage && failure && failure.error && failure.error.message) {
+			job.errorMessage = String(failure.error.message);
+		}
+		if (status === 'failed') {
+			const finalOutput = collectSessionOutput(failure);
+			if (finalOutput && !job.sessionOutput.includes(finalOutput)) {
+				job.sessionOutput = truncateOutput(job.sessionOutput ? `${job.sessionOutput}\n\n${finalOutput}` : finalOutput);
+			}
+		} else {
+			job.sessionOutput = '';
+		}
 		this.recent.unshift({
 			id: job.id,
 			requestId: job.requestId,
@@ -105,6 +160,7 @@ class JobManager {
 			startedAt: job.startedAt,
 			finishedAt: job.finishedAt,
 			errorMessage: job.errorMessage,
+			sessionOutput: job.sessionOutput,
 		});
 		this.recent = this.recent.slice(0, 8);
 		this.emitChange();
@@ -114,7 +170,7 @@ class JobManager {
 	compact(job) {
 		const referenceTime = job.finishedAt || this.now();
 		const startedAt = job.startedAt || job.createdAt;
-		return {
+		const compacted = {
 			id: job.id,
 			request_id: job.requestId,
 			short_request_id: shortRequestId(job.requestId || String(job.id)),
@@ -125,6 +181,13 @@ class JobManager {
 			finished_at: job.finishedAt || 0,
 			elapsed_ms: Math.max(0, referenceTime - startedAt),
 		};
+		if (job.errorMessage) {
+			compacted.error_message = job.errorMessage;
+		}
+		if (job.sessionOutput) {
+			compacted.session_output = job.sessionOutput;
+		}
+		return compacted;
 	}
 
 	snapshot() {
@@ -146,5 +209,7 @@ class JobManager {
 module.exports = {
 	JobManager,
 	clampMaxConcurrent,
+	collectSessionOutput,
 	shortRequestId,
+	truncateOutput,
 };

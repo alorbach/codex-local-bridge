@@ -31,6 +31,10 @@ function blend(left, right, amount) {
 	return Math.round(left + (right - left) * amount);
 }
 
+function blendColor(left, right, amount) {
+	return left.map((value, index) => blend(value, right[index], amount));
+}
+
 const defaultPalette = {
 	top: [88, 240, 255],
 	mid: [91, 124, 255],
@@ -60,6 +64,18 @@ const statePalettes = {
 	},
 };
 
+function activeFramePalette(frameIndex, frameCount) {
+	const phase = frameCount > 1 ? frameIndex / (frameCount - 1) : 0;
+	const wave = (1 - Math.cos(phase * Math.PI * 2)) / 2;
+	const highlight = [232, 255, 255];
+	return {
+		top: blendColor(statePalettes.active.top, highlight, 0.18 + wave * 0.28),
+		mid: blendColor(statePalettes.active.mid, [107, 255, 214], 0.08 + wave * 0.22),
+		bottom: blendColor(statePalettes.active.bottom, [92, 184, 255], 0.04 + wave * 0.18),
+		phase,
+	};
+}
+
 function colorFor(size, x, y, palette = defaultPalette) {
 	const center = (size - 1) / 2;
 	const dx = x - center;
@@ -86,15 +102,25 @@ function colorFor(size, x, y, palette = defaultPalette) {
 		const ndy = y - size * ny;
 		return Math.sqrt(ndx * ndx + ndy * ndy) < size * 0.095;
 	});
+	const hasPulse = Number.isFinite(palette.phase);
+	const pulseCenterX = size * (0.2 + (hasPulse ? palette.phase : 0) * 0.6);
+	const pulseCenterY = size * 0.42;
+	const pulseDistance = Math.sqrt((x - pulseCenterX) ** 2 + (y - pulseCenterY) ** 2) / size;
+	const pulse = hasPulse ? Math.max(0, 1 - pulseDistance * 5.2) : 0;
+	const pulseBase = [
+		blend(base[0], 245, pulse * 0.6),
+		blend(base[1], 255, pulse * 0.45),
+		blend(base[2], 255, pulse * 0.4),
+	];
 
 	if (mast || deck) {
-		return [234, 252, 255, 255];
+		return [blend(234, 255, pulse * 0.45), blend(252, 255, pulse * 0.35), 255, 255];
 	}
 	if (bridge || node) {
-		return [base[0], base[1], base[2], 255];
+		return [pulseBase[0], pulseBase[1], pulseBase[2], 255];
 	}
 	if (ring) {
-		return [base[0], base[1], base[2], 235];
+		return [pulseBase[0], pulseBase[1], pulseBase[2], 235];
 	}
 	const shade = 1 - distance * 0.32;
 	return [Math.round(8 * shade), Math.round(24 * shade), Math.round(39 * shade), 245];
@@ -165,6 +191,9 @@ for (const image of pngs) {
 fs.writeFileSync(path.join(assetsDir, 'tray-icon.png'), pngs.find((image) => image.size === 32).data);
 for (const [name, palette] of Object.entries(statePalettes)) {
 	fs.writeFileSync(path.join(assetsDir, `tray-${name}.png`), createPng(32, palette));
+}
+for (let frame = 0; frame < 6; frame += 1) {
+	fs.writeFileSync(path.join(assetsDir, `tray-active-${frame}.png`), createPng(32, activeFramePalette(frame, 6)));
 }
 fs.writeFileSync(path.join(assetsDir, 'icon.ico'), createIco(pngs));
 process.stdout.write('Generated Local Codex bridge icons.\n');

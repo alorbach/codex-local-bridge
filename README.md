@@ -20,6 +20,7 @@ Windows tray companion for Alorbach AI Subscription Gateway. It exposes a secure
 - Executes signed Gateway image jobs and returns normalized base64 image data.
 - Runs local Codex jobs with bounded parallelism and queues overflow requests.
 - Shows bridge status, Codex login status, paired sites, diagnostics, restart, and unpair actions in the tray menu.
+- Opens a minimal local status page on tray icon double-click.
 
 ## Tray Menu
 
@@ -113,6 +114,7 @@ http://127.0.0.1:8765
 
 Routes:
 
+- `GET /status`: minimal visual bridge status page.
 - `GET /v1/status`: local bridge and Codex readiness.
 - `POST /v1/pair`: exchange tray pairing code for an origin token.
 - `POST /v1/unpair`: remove the pairing for the request origin.
@@ -162,6 +164,8 @@ In production, these values come from WordPress Gateway. The bridge checks that 
   }
 }
 ```
+
+The `/status` page auto-refreshes and shows bounded live Codex session output for running jobs. Failed bridge requests include a `debug_help` object with the request id when available, links to `/status` and `/v1/status`, and safe troubleshooting checks. Recent failed jobs keep bounded Codex session output such as stderr/stdout/last response text when available.
 
 ## Security Model
 

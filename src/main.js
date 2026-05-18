@@ -24,7 +24,11 @@ let lastServerError = '';
 let cachedCodexStatus = { success: false, message: 'Checking Codex status...', details: {} };
 let jobState = { running_count: 0, queued_count: 0, max_concurrent: 2, active: [], queued: [], recent: [] };
 let trayIcons = {};
-let currentTrayIconName = '';
+let currentTrayIconKey = '';
+let trayAnimationTimer = null;
+let trayAnimationFrame = 0;
+
+const activeAnimationFrameCount = 6;
 
 function loadTrayIcon(name = 'idle') {
 	const assetName = name === 'idle' ? 'tray-icon.png' : `tray-${name}.png`;
@@ -74,9 +78,19 @@ function bridgeUrl() {
 	return `http://127.0.0.1:${serverPort}`;
 }
 
+function statusPageUrl() {
+	return `${bridgeUrl()}/status`;
+}
+
 function displayVersion() {
 	const build = buildInfo.build_number || 'dev';
 	return `${buildInfo.version || packageInfo.version} (${build})`;
+}
+
+function openStatusPage() {
+	if (bridgeState === 'Running') {
+		shell.openExternal(statusPageUrl());
+	}
 }
 
 function refreshCodexStatus() {
@@ -277,7 +291,12 @@ function buildMenu() {
 			click: () => refreshCodexStatus(),
 		},
 		{
-			label: 'Open local status',
+			label: 'Open status page',
+			enabled: bridgeState === 'Running',
+			click: () => openStatusPage(),
+		},
+		{
+			label: 'Open status JSON',
 			enabled: bridgeState === 'Running',
 			click: () => shell.openExternal(bridgeUrl() + '/v1/status'),
 		},
@@ -340,13 +359,51 @@ function trayIconName() {
 	if (recentFailure) {
 		return 'error';
 	}
-	if ((jobState.queued_count || 0) > 0) {
-		return 'queued';
-	}
 	if ((jobState.running_count || 0) > 0) {
 		return 'active';
 	}
+	if ((jobState.queued_count || 0) > 0) {
+		return 'queued';
+	}
 	return 'idle';
+}
+
+function setTrayIcon(name) {
+	if (!tray || name === currentTrayIconKey) {
+		return;
+	}
+	tray.setImage(trayIcon(name));
+	currentTrayIconKey = name;
+}
+
+function stopTrayAnimation() {
+	if (trayAnimationTimer) {
+		clearInterval(trayAnimationTimer);
+		trayAnimationTimer = null;
+	}
+	trayAnimationFrame = 0;
+}
+
+function animateTrayIcon() {
+	const frameName = `active-${trayAnimationFrame % activeAnimationFrameCount}`;
+	setTrayIcon(frameName);
+	trayAnimationFrame += 1;
+}
+
+function updateTrayIcon() {
+	const iconName = trayIconName();
+	if (iconName === 'active') {
+		if (!trayAnimationTimer) {
+			animateTrayIcon();
+			trayAnimationTimer = setInterval(animateTrayIcon, 450);
+			if (typeof trayAnimationTimer.unref === 'function') {
+				trayAnimationTimer.unref();
+			}
+		}
+		return;
+	}
+	stopTrayAnimation();
+	setTrayIcon(iconName);
 }
 
 function refreshTray() {
@@ -358,11 +415,7 @@ function refreshTray() {
 		const model = job.model ? ` ${shortText(job.model, 24)}` : '';
 		return `${id}: ${job.type}${model} ${formatElapsed(job.elapsed_ms)}`;
 	});
-	const iconName = trayIconName();
-	if (iconName !== currentTrayIconName) {
-		tray.setImage(trayIcon(iconName));
-		currentTrayIconName = iconName;
-	}
+	updateTrayIcon();
 	const tooltip = [
 		'Codex Local Bridge',
 		`Bridge: ${bridgeState}`,
@@ -378,6 +431,7 @@ function refreshTray() {
 
 async function boot() {
 	tray = new Tray(trayIcon('idle'));
+	tray.on('double-click', () => openStatusPage());
 	refreshTray();
 	await startBridge();
 	refreshCodexStatus();
@@ -388,6 +442,7 @@ async function boot() {
 app.whenReady().then(boot);
 
 app.on('before-quit', () => {
+	stopTrayAnimation();
 	if (serverProcess) {
 		serverProcess.kill();
 		serverProcess = null;

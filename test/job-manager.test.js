@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('assert');
-const { JobManager } = require('../src/job-manager');
+const { JobManager, collectSessionOutput, truncateOutput } = require('../src/job-manager');
 
 function tick() {
 	return new Promise((resolve) => setImmediate(resolve));
@@ -41,9 +41,21 @@ function deferredRunner(label, started, resolvers, result = { success: true }) {
 
 	{
 		const manager = new JobManager({ maxConcurrent: 1 });
-		const failed = await manager.run({ requestId: 'request-fail', type: 'chat' }, () => ({ success: false, message: 'failed' }));
+		let finishLive;
+		const live = manager.run({ requestId: 'request-live', type: 'chat' }, (session) => new Promise((resolve) => {
+			session.appendSessionOutput('stdout', 'live output line');
+			finishLive = () => resolve({ success: true });
+		}));
+		await tick();
+		assert.strictEqual(manager.snapshot().active[0].session_output, 'STDOUT:\nlive output line');
+		finishLive();
+		await live;
+		assert.ok(!Object.prototype.hasOwnProperty.call(manager.snapshot().recent[0], 'session_output'));
+
+		const failed = await manager.run({ requestId: 'request-fail', type: 'chat' }, () => ({ success: false, message: 'failed', details: { stderr: 'session stderr' } }));
 		assert.strictEqual(failed.success, false);
 		assert.strictEqual(manager.snapshot().recent[0].status, 'failed');
+		assert.strictEqual(manager.snapshot().recent[0].session_output, 'STDERR:\nsession stderr');
 		const next = await manager.run({ requestId: 'request-next', type: 'chat' }, () => ({ success: true }));
 		assert.strictEqual(next.success, true);
 	}
@@ -69,6 +81,11 @@ function deferredRunner(label, started, resolvers, result = { success: true }) {
 		await image;
 		assert.strictEqual(manager.snapshot().running_count, 0);
 	}
+
+	assert.ok(collectSessionOutput({ details: { stdout: 'out', stderr: 'err', response_text: 'last' } }).includes('STDOUT:\nout'));
+	assert.ok(collectSessionOutput({ details: { stdout: 'out', stderr: 'err', response_text: 'last' } }).includes('STDERR:\nerr'));
+	assert.ok(collectSessionOutput({ details: { stdout: 'out', stderr: 'err', response_text: 'last' } }).includes('RESPONSE_TEXT:\nlast'));
+	assert.ok(truncateOutput('x'.repeat(13000)).includes('[truncated'));
 
 	console.log('job manager tests passed');
 })().catch((error) => {

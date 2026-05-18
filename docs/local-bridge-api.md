@@ -27,6 +27,10 @@ X-Alorbach-Request-Id: <request-id>
 
 The maximum JSON request body is 12 MiB. This is intended to support normal chat payloads and image prompts, not binary uploads.
 
+## `GET /status`
+
+Shows a minimal local HTML status page for the same runtime data exposed by `GET /v1/status`. The page auto-refreshes and shows bounded live Codex session output for running jobs. The tray app opens this page when the tray icon is double-clicked.
+
 ## `GET /v1/status`
 
 Checks bridge and local Codex readiness. This route does not require pairing.
@@ -240,9 +244,22 @@ Most errors use:
 {
   "success": false,
   "message": "Human-readable failure.",
-  "details": {}
+  "details": {},
+  "debug_help": {
+    "request_id": "request-123",
+    "route": "/v1/chat",
+    "status_code": 500,
+    "status_page": "http://127.0.0.1:8765/status",
+    "status_json": "http://127.0.0.1:8765/v1/status",
+    "checks": [
+      "Open the status page and check Codex readiness plus recent failed jobs.",
+      "Use the tray menu Copy diagnostics action for a safe diagnostic payload without bearer tokens."
+    ]
+  }
 }
 ```
+
+`debug_help` is intended for failed local bridge requests. It includes the request id when available, local status links, and safe troubleshooting steps. Running jobs and recent failed jobs in `GET /v1/status` can include bounded `session_output` when Codex stderr/stdout/last response text is available.
 
 Common status codes:
 

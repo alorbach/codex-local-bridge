@@ -106,12 +106,16 @@ Use the tray menu:
 
 ![Codex Local Bridge tray menu](images/tray-menu.png)
 
-- `Open local status` opens `/v1/status`;
+- double-clicking the tray icon opens `/status`;
+- `Open status page` opens `/status`;
+- `Open status JSON` opens `/v1/status`;
 - `Copy diagnostics` copies a JSON diagnostic payload without bearer token values;
 - `Open bridge data folder` opens `%USERPROFILE%\.alorbach-codex-bridge`;
 - `Refresh Codex status` rechecks `codex --version` and `codex login status`.
 
-The tray icon changes color for running, queued, failed, and stopped states. Mouse-over text and the tray menu show running and queued job counts plus request IDs, job types, models, and elapsed time. Prompt and message content are not shown.
+The tray icon animates while jobs are running and changes color for queued, failed, and stopped states. Mouse-over text and the tray menu show running and queued job counts plus request IDs, job types, models, and elapsed time. Prompt and message content are not shown.
+
+Failed bridge requests include a `debug_help` object in the JSON response. It points to `/status`, `/v1/status`, the request id when available, and safe checks such as Codex login status, pairing state, and tray diagnostics. The `/status` page auto-refreshes and shows bounded live Codex session output for running jobs, then keeps recent failed jobs with stderr/stdout/last response text when available.
 
 Useful direct checks:
 

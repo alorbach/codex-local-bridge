@@ -2,8 +2,10 @@
 
 const http = require('http');
 const codex = require('./codex');
+const { attachDebugHelp } = require('./debug-help');
 const { JobManager, clampMaxConcurrent } = require('./job-manager');
 const security = require('./security');
+const { statusPageHtml } = require('./status-page');
 
 let pairingCode = security.createPairingCode();
 
@@ -39,6 +41,21 @@ function sendJson(res, statusCode, payload, origin) {
 	}
 	res.writeHead(statusCode, headers);
 	res.end(JSON.stringify(payload));
+}
+
+function sendHtml(res, statusCode, html) {
+	res.writeHead(statusCode, {
+		'Content-Type': 'text/html; charset=utf-8',
+		'Cache-Control': 'no-store',
+	});
+	res.end(html);
+}
+
+function sendErrorJson(req, res, statusCode, payload, origin, options = {}) {
+	sendJson(res, statusCode, attachDebugHelp(req, payload, {
+		...options,
+		statusCode,
+	}), origin);
 }
 
 function readBody(req, maxBytes) {
@@ -83,7 +100,7 @@ function requirePairing(req, res, bridgeSecurity) {
 	const origin = exposeOrigin(req, bridgeSecurity);
 	const token = req.headers['x-alorbach-bridge-token'];
 	if (!origin || !bridgeSecurity.validateBridgeToken(origin, token)) {
-		sendJson(res, 403, { success: false, message: 'This WordPress origin is not paired with the local Codex bridge.' }, origin);
+		sendErrorJson(req, res, 403, { success: false, message: 'This WordPress origin is not paired with the local Codex bridge.' }, origin);
 		return null;
 	}
 	return origin;
@@ -99,7 +116,7 @@ async function route(req, res, context) {
 	const jobManager = context.jobManager;
 	const origin = exposeOrigin(req, bridgeSecurity);
 	if (!bridgeSecurity.isLocalAddress(req)) {
-		sendJson(res, 403, { success: false, message: 'Local Codex bridge only accepts localhost requests.' });
+		sendErrorJson(req, res, 403, { success: false, message: 'Local Codex bridge only accepts localhost requests.' });
 		return;
 	}
 
@@ -109,6 +126,11 @@ async function route(req, res, context) {
 	}
 
 	const url = new URL(req.url, 'http://127.0.0.1');
+	if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/status')) {
+		sendHtml(res, 200, statusPageHtml());
+		return;
+	}
+
 	if (req.method === 'GET' && url.pathname === '/v1/status') {
 		const status = codexAdapter.checkStatus();
 		sendJson(res, status.success ? 200 : 503, {
@@ -132,7 +154,7 @@ async function route(req, res, context) {
 	}
 
 	if (req.method !== 'POST') {
-		sendJson(res, 405, { success: false, message: 'Method not allowed.' }, origin);
+		sendErrorJson(req, res, 405, { success: false, message: 'Method not allowed.' }, origin);
 		return;
 	}
 
@@ -140,18 +162,18 @@ async function route(req, res, context) {
 	try {
 		body = await readBody(req, bridgeSecurity.MAX_BODY_BYTES || security.MAX_BODY_BYTES);
 	} catch (error) {
-		sendJson(res, 400, { success: false, message: error.message || 'Invalid request.' }, origin);
+		sendErrorJson(req, res, 400, { success: false, message: error.message || 'Invalid request.' }, origin);
 		return;
 	}
 
 	if (url.pathname === '/v1/pair') {
 		const safeOrigin = bridgeSecurity.normalizeOrigin(body.origin || origin);
 		if (!safeOrigin) {
-			sendJson(res, 400, { success: false, message: 'A valid WordPress origin is required.' }, origin);
+			sendErrorJson(req, res, 400, { success: false, message: 'A valid WordPress origin is required.' }, origin);
 			return;
 		}
 		if (String(body.pairing_code || '') !== pairingCode) {
-			sendJson(res, 403, { success: false, message: 'Pairing code did not match the local tray app.' }, safeOrigin);
+			sendErrorJson(req, res, 403, { success: false, message: 'Pairing code did not match the local tray app.' }, safeOrigin);
 			return;
 		}
 		const token = bridgeSecurity.createToken();
@@ -179,7 +201,7 @@ async function route(req, res, context) {
 		return;
 	}
 	if (!body.job_token || !body.request_hash || !body.request_id) {
-		sendJson(res, 400, { success: false, message: 'Signed WordPress job token, request hash, and request id are required.' }, pairedOrigin);
+		sendErrorJson(req, res, 400, { success: false, message: 'Signed WordPress job token, request hash, and request id are required.' }, pairedOrigin, { requestId: body.request_id });
 		return;
 	}
 
@@ -188,8 +210,12 @@ async function route(req, res, context) {
 			requestId: body.request_id,
 			type: 'chat',
 			model: modelFromPayload(body.payload, 'codex-local:auto'),
-		}, () => codexAdapter.chat(body.payload || {}));
-		sendJson(res, result.success ? 200 : 500, result, pairedOrigin);
+		}, (session) => codexAdapter.chat(body.payload || {}, session));
+		if (!result.success) {
+			sendErrorJson(req, res, 500, result, pairedOrigin, { requestId: body.request_id, route: '/v1/chat' });
+			return;
+		}
+		sendJson(res, 200, result, pairedOrigin);
 		return;
 	}
 	if (url.pathname === '/v1/images') {
@@ -197,11 +223,15 @@ async function route(req, res, context) {
 			requestId: body.request_id,
 			type: 'images',
 			model: modelFromPayload(body.payload, 'codex-local:image'),
-		}, () => codexAdapter.images(body.payload || {}));
-		sendJson(res, result.success ? 200 : 500, result, pairedOrigin);
+		}, (session) => codexAdapter.images(body.payload || {}, session));
+		if (!result.success) {
+			sendErrorJson(req, res, 500, result, pairedOrigin, { requestId: body.request_id, route: '/v1/images' });
+			return;
+		}
+		sendJson(res, 200, result, pairedOrigin);
 		return;
 	}
-	sendJson(res, 404, { success: false, message: 'Unknown local bridge route.' }, pairedOrigin);
+	sendErrorJson(req, res, 404, { success: false, message: 'Unknown local bridge route.' }, pairedOrigin, { requestId: body.request_id });
 }
 
 function createServer(options = {}) {
@@ -212,7 +242,7 @@ function createServer(options = {}) {
 	};
 	const server = http.createServer((req, res) => {
 		route(req, res, context).catch((error) => {
-			sendJson(res, 500, { success: false, message: error && error.message ? error.message : 'Unexpected bridge failure.' }, exposeOrigin(req, context.security));
+			sendErrorJson(req, res, 500, { success: false, message: error && error.message ? error.message : 'Unexpected bridge failure.' }, exposeOrigin(req, context.security));
 		});
 	});
 	server.jobManager = context.jobManager;

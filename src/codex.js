@@ -81,7 +81,8 @@ function runCodex(args, options = {}) {
 }
 
 function runCodexAsync(args, options = {}) {
-	const { timeout, ...spawnOptions } = options;
+	const { timeout, onOutput, ...spawnOptions } = options;
+	const emitOutput = typeof onOutput === 'function' ? onOutput : () => {};
 	return new Promise((resolve) => {
 		let child;
 		let stdout = '';
@@ -92,6 +93,7 @@ function runCodexAsync(args, options = {}) {
 			child = spawn(resolveCodexBinary(), args, {
 				shell: false,
 				windowsHide: true,
+				stdio: ['ignore', 'pipe', 'pipe'],
 				env: {
 					...process.env,
 					CODEX_HOME: codexHome,
@@ -112,10 +114,14 @@ function runCodexAsync(args, options = {}) {
 			timer.unref();
 		}
 		child.stdout.on('data', (chunk) => {
-			stdout += String(chunk || '');
+			const text = String(chunk || '');
+			stdout += text;
+			emitOutput('stdout', text);
 		});
 		child.stderr.on('data', (chunk) => {
-			stderr += String(chunk || '');
+			const text = String(chunk || '');
+			stderr += text;
+			emitOutput('stderr', text);
 		});
 		child.once('error', (error) => {
 			spawnError = error;
@@ -207,7 +213,7 @@ function messagesToPrompt(messages, maxTokens) {
 	return parts.join('\n');
 }
 
-async function chat(payload) {
+async function chat(payload, session = {}) {
 	const status = checkStatus();
 	if (!status.success) {
 		return status;
@@ -233,7 +239,7 @@ async function chat(payload) {
 		args.push('--model', model);
 	}
 	args.push(prompt);
-	const run = await runCodexAsync(args, { cwd: tempDir, timeout: Number(process.env.ALORBACH_CODEX_CHAT_TIMEOUT_MS || 600000) });
+	const run = await runCodexAsync(args, { cwd: tempDir, timeout: Number(process.env.ALORBACH_CODEX_CHAT_TIMEOUT_MS || 600000), onOutput: session.appendSessionOutput });
 	const stdout = (run.stdout || '').trim();
 	const stderr = (run.stderr || '').trim();
 	let responseText = '';
@@ -241,7 +247,7 @@ async function chat(payload) {
 		responseText = fs.readFileSync(outputFile, 'utf8').trim();
 	}
 	if (run.error) {
-		return { success: false, message: 'Codex CLI could not be executed for chat.', details: { error: run.error.message || String(run.error) } };
+		return { success: false, message: 'Codex CLI could not be executed for chat.', details: { error: run.error.message || String(run.error), stdout, stderr, status: run.status, signal: run.signal } };
 	}
 	if (run.status !== 0) {
 		return { success: false, message: 'Codex CLI chat request failed.', details: { stdout, stderr, response_text: responseText } };
@@ -310,7 +316,7 @@ function imagePrompt(payload) {
 	].join('\n');
 }
 
-async function images(payload) {
+async function images(payload, session = {}) {
 	const status = checkStatus();
 	if (!status.success) {
 		return status;
@@ -333,13 +339,13 @@ async function images(payload) {
 		outputFile,
 		imagePrompt(payload),
 	];
-	const run = await runCodexAsync(args, { cwd: tempDir, timeout: Number(process.env.ALORBACH_CODEX_IMAGE_TIMEOUT_MS || 1800000) });
+	const run = await runCodexAsync(args, { cwd: tempDir, timeout: Number(process.env.ALORBACH_CODEX_IMAGE_TIMEOUT_MS || 1800000), onOutput: session.appendSessionOutput });
 	const after = listGeneratedImages(generatedImagesDir);
 	const newImages = detectNewImage(before, after);
 	const stdout = (run.stdout || '').trim();
 	const stderr = (run.stderr || '').trim();
 	if (run.error) {
-		return { success: false, message: 'Codex CLI could not be executed for image generation.', details: { error: run.error.message || String(run.error) } };
+		return { success: false, message: 'Codex CLI could not be executed for image generation.', details: { error: run.error.message || String(run.error), stdout, stderr, status: run.status, signal: run.signal } };
 	}
 	if (run.status !== 0) {
 		return { success: false, message: 'Codex CLI image generation failed.', details: { stdout, stderr } };
