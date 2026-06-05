@@ -186,7 +186,10 @@ function normalizeTokenCount(rawValue) {
 	return digits ? Number.parseInt(digits, 10) || 0 : 0;
 }
 
-function parseUsage(stdout, stderr) {
+function parseUsage(stdout, stderr, structured) {
+	if (structured && structured.usage) {
+		return structured.usage;
+	}
 	const combined = `${stdout || ''}\n${stderr || ''}`;
 	const patterns = [
 		/tokens used\s*[:\-]?\s*([\d,]+)/i,
@@ -204,11 +207,211 @@ function parseUsage(stdout, stderr) {
 	return { total_tokens: 0, local_unmetered: true };
 }
 
-function codexImageFailureFromOutput(stdout, stderr, generatedImagesPath = generatedImagesDir) {
+function textFromUnknown(value) {
+	if (typeof value === 'string') {
+		return value;
+	}
+	if (Array.isArray(value)) {
+		return value.map(textFromUnknown).filter(Boolean).join('\n');
+	}
+	if (!value || typeof value !== 'object') {
+		return '';
+	}
+	for (const key of ['text', 'content', 'message', 'output', 'result']) {
+		const text = textFromUnknown(value[key]);
+		if (text) {
+			return text;
+		}
+	}
+	return '';
+}
+
+function eventUsage(event) {
+	if (!event || typeof event !== 'object') {
+		return null;
+	}
+	const usage = event.usage || (event.turn && event.turn.usage) || (event.payload && event.payload.usage);
+	if (!usage || typeof usage !== 'object') {
+		return null;
+	}
+	const total = normalizeTokenCount(usage.total_tokens || usage.total || usage.tokens_used);
+	if (total > 0) {
+		return { total_tokens: total };
+	}
+	return null;
+}
+
+function codexEventError(event) {
+	if (!event || typeof event !== 'object') {
+		return '';
+	}
+	const error = event.error || (event.payload && event.payload.error);
+	if (typeof error === 'string') {
+		return error;
+	}
+	if (error && typeof error === 'object') {
+		return String(error.message || error.code || JSON.stringify(error));
+	}
+	if (/failed|error/i.test(String(event.type || event.event || ''))) {
+		return textFromUnknown(event) || String(event.type || event.event || 'Codex event failed.');
+	}
+	return '';
+}
+
+function summarizeCodexEvent(event) {
+	const type = String((event && (event.type || event.event)) || '').trim();
+	if (!type) {
+		return '';
+	}
+	const item = event.item || (event.payload && event.payload.item) || {};
+	const itemType = String(item.type || item.kind || '').trim();
+	const error = codexEventError(event);
+	if (error) {
+		return `${type}: ${error}`;
+	}
+	if (/message|agent/i.test(itemType)) {
+		const text = textFromUnknown(item);
+		return text ? `${type}/${itemType}: ${text.slice(0, 500)}` : `${type}/${itemType}`;
+	}
+	if (/command|exec|shell/i.test(itemType)) {
+		const command = textFromUnknown(item.command || item.args || item);
+		return command ? `${type}/${itemType}: ${command.slice(0, 500)}` : `${type}/${itemType}`;
+	}
+	if (/thread|turn/.test(type)) {
+		return type;
+	}
+	return '';
+}
+
+function parseCodexJsonEvents(stdout) {
+	const events = [];
+	const errors = [];
+	const finalMessages = [];
+	const invalidLines = [];
+	let usage = null;
+	for (const line of String(stdout || '').split(/\r?\n/)) {
+		const trimmed = line.trim();
+		if (!trimmed) {
+			continue;
+		}
+		let event;
+		try {
+			event = JSON.parse(trimmed);
+		} catch (error) {
+			invalidLines.push(trimmed.slice(0, 1000));
+			continue;
+		}
+		events.push(event);
+		const errorText = codexEventError(event);
+		if (errorText) {
+			errors.push(errorText);
+		}
+		const eventType = String(event.type || event.event || '');
+		const item = event.item || (event.payload && event.payload.item) || {};
+		const itemType = String(item.type || item.kind || '');
+		if (/completed|message|item/.test(eventType) && /message|agent/i.test(itemType)) {
+			const text = textFromUnknown(item);
+			if (text) {
+				finalMessages.push(text);
+			}
+		}
+		const nextUsage = eventUsage(event);
+		if (nextUsage) {
+			usage = nextUsage;
+		}
+	}
+	return {
+		events,
+		errors,
+		finalMessages,
+		invalidLines,
+		summary: events.map(summarizeCodexEvent).filter(Boolean).slice(-40),
+		usage,
+	};
+}
+
+function codexJsonUnsupported(run) {
+	const combined = `${run && run.stdout || ''}\n${run && run.stderr || ''}`;
+	return !!(run && run.status !== 0 && /(?:unknown|unexpected|unrecognized).{0,80}(?:--json|json)|(?:--json|json).{0,80}(?:unknown|unexpected|unrecognized)/i.test(combined));
+}
+
+function createJsonOutputCollector(onOutput) {
+	let pending = '';
+	const parsedLines = [];
+	const emit = typeof onOutput === 'function' ? onOutput : () => {};
+	function consume(line) {
+		const trimmed = line.trim();
+		if (!trimmed) {
+			return;
+		}
+		parsedLines.push(trimmed);
+		try {
+			const event = JSON.parse(trimmed);
+			const summary = summarizeCodexEvent(event);
+			if (summary) {
+				emit('event', summary);
+			}
+		} catch (error) {}
+	}
+	return {
+		append(chunk) {
+			pending += String(chunk || '');
+			const lines = pending.split(/\r?\n/);
+			pending = lines.pop() || '';
+			for (const line of lines) {
+				consume(line);
+			}
+		},
+		flush() {
+			if (pending) {
+				consume(pending);
+				pending = '';
+			}
+		},
+		raw() {
+			return parsedLines.join('\n');
+		},
+	};
+}
+
+async function runCodexExec(args, options = {}) {
+	const jsonArgs = args[0] === 'exec' ? ['exec', '--json', ...args.slice(1)] : ['--json', ...args];
+	const onOutput = typeof options.onOutput === 'function' ? options.onOutput : () => {};
+	const collector = createJsonOutputCollector(onOutput);
+	const run = await runCodexAsync(jsonArgs, {
+		...options,
+		onOutput: (stream, chunk) => {
+			if (stream === 'stdout') {
+				collector.append(chunk);
+				return;
+			}
+			onOutput(stream, chunk);
+		},
+	});
+	collector.flush();
+	run.structured = parseCodexJsonEvents(run.stdout || collector.raw());
+	run.used_json = true;
+	if (!codexJsonUnsupported(run)) {
+		return run;
+	}
+	const fallback = await runCodexAsync(args, options);
+	fallback.structured = parseCodexJsonEvents('');
+	fallback.used_json = false;
+	fallback.json_fallback_reason = 'Codex CLI does not support `codex exec --json`.';
+	return fallback;
+}
+
+function codexImageFailureFromOutput(stdout, stderr, generatedImagesPath = generatedImagesDir, structured = null) {
 	const cleanStdout = String(stdout || '').trim();
 	const cleanStderr = String(stderr || '').trim();
 	const combined = `${cleanStdout}\n${cleanStderr}`;
 	const details = { generated_images_dir: generatedImagesPath, stdout: cleanStdout, stderr: cleanStderr };
+	if (structured && structured.summary && structured.summary.length) {
+		details.structured_events = structured.summary;
+	}
+	if (structured && structured.errors && structured.errors.length) {
+		details.event_errors = structured.errors;
+	}
 	if (/rate limit|rate-limit|rate limiting|too many requests/i.test(combined)) {
 		return {
 			success: false,
@@ -393,18 +596,21 @@ async function chat(payload, session = {}) {
 		args.push('--image', attachment.path);
 	}
 	args.push('-');
-	const run = await runCodexAsync(args, { cwd: tempDir, timeout: Number(process.env.ALORBACH_CODEX_CHAT_TIMEOUT_MS || 600000), onOutput: session.appendSessionOutput, input: prompt });
+	const run = await runCodexExec(args, { cwd: tempDir, timeout: Number(process.env.ALORBACH_CODEX_CHAT_TIMEOUT_MS || 600000), onOutput: session.appendSessionOutput, input: prompt });
 	const stdout = (run.stdout || '').trim();
 	const stderr = (run.stderr || '').trim();
 	let responseText = '';
 	if (fs.existsSync(outputFile)) {
 		responseText = fs.readFileSync(outputFile, 'utf8').trim();
 	}
+	if (!responseText && run.structured && run.structured.finalMessages.length) {
+		responseText = run.structured.finalMessages[run.structured.finalMessages.length - 1].trim();
+	}
 	if (run.error) {
-		return { success: false, message: 'Codex CLI could not be executed for chat.', details: { error: run.error.message || String(run.error), stdout, stderr, status: run.status, signal: run.signal } };
+		return { success: false, message: 'Codex CLI could not be executed for chat.', details: { error: run.error.message || String(run.error), stdout, stderr, status: run.status, signal: run.signal, structured_events: run.structured && run.structured.summary, event_errors: run.structured && run.structured.errors } };
 	}
 	if (run.status !== 0) {
-		return { success: false, message: 'Codex CLI chat request failed.', details: { stdout, stderr, response_text: responseText } };
+		return { success: false, message: 'Codex CLI chat request failed.', details: { stdout, stderr, response_text: responseText, structured_events: run.structured && run.structured.summary, event_errors: run.structured && run.structured.errors } };
 	}
 	return {
 		success: true,
@@ -419,7 +625,11 @@ async function chat(payload, session = {}) {
 					finish_reason: 'stop',
 				},
 			],
-			usage: parseUsage(stdout, stderr),
+			usage: parseUsage(stdout, stderr, run.structured),
+			provider_details: {
+				structured_events: !!run.used_json,
+				json_fallback_reason: run.json_fallback_reason || undefined,
+			},
 		},
 	};
 }
@@ -493,31 +703,31 @@ async function images(payload, session = {}) {
 		outputFile,
 		'-',
 	];
-	const run = await runCodexAsync(args, { cwd: tempDir, timeout: Number(process.env.ALORBACH_CODEX_IMAGE_TIMEOUT_MS || 1800000), onOutput: session.appendSessionOutput, input: imagePrompt(payload) });
+	const run = await runCodexExec(args, { cwd: tempDir, timeout: Number(process.env.ALORBACH_CODEX_IMAGE_TIMEOUT_MS || 1800000), onOutput: session.appendSessionOutput, input: imagePrompt(payload) });
 	const after = listGeneratedImages(generatedImagesDir);
 	const newImages = detectNewImage(before, after);
 	const stdout = (run.stdout || '').trim();
 	const stderr = (run.stderr || '').trim();
 	if (run.error) {
-		return { success: false, message: 'Codex CLI could not be executed for image generation.', details: { error: run.error.message || String(run.error), stdout, stderr, status: run.status, signal: run.signal } };
+		return { success: false, message: 'Codex CLI could not be executed for image generation.', details: { error: run.error.message || String(run.error), stdout, stderr, status: run.status, signal: run.signal, structured_events: run.structured && run.structured.summary, event_errors: run.structured && run.structured.errors } };
 	}
 	if (run.status !== 0) {
-		const failure = codexImageFailureFromOutput(stdout, stderr);
+		const failure = codexImageFailureFromOutput(stdout, stderr, generatedImagesDir, run.structured);
 		if (failure.code === 'codex_rate_limited') {
 			return failure;
 		}
-		return { success: false, code: 'codex_cli_image_failed', category: 'codex_cli', message: 'Codex CLI image generation failed.', details: { stdout, stderr } };
+		return { success: false, code: 'codex_cli_image_failed', category: 'codex_cli', message: 'Codex CLI image generation failed.', details: { stdout, stderr, structured_events: run.structured && run.structured.summary, event_errors: run.structured && run.structured.errors } };
 	}
 	if (!newImages.length) {
-		return codexImageFailureFromOutput(stdout, stderr);
+		return codexImageFailureFromOutput(stdout, stderr, generatedImagesDir, run.structured);
 	}
 	const bytes = fs.readFileSync(newImages[0].path);
 	return {
 		success: true,
 		response: {
 			data: [{ b64_json: bytes.toString('base64') }],
-			usage: parseUsage(stdout, stderr),
-			provider_details: { image_path: newImages[0].path, generated_images_dir: generatedImagesDir },
+			usage: parseUsage(stdout, stderr, run.structured),
+			provider_details: { image_path: newImages[0].path, generated_images_dir: generatedImagesDir, structured_events: !!run.used_json, json_fallback_reason: run.json_fallback_reason || undefined },
 		},
 	};
 }
@@ -544,14 +754,43 @@ function models() {
 	};
 }
 
+function capabilities() {
+	const version = runCodex(['--version']);
+	const help = runCodex(['exec', '--help']);
+	const appServer = runCodex(['app-server', '--help']);
+	const helpText = `${help.stdout || ''}\n${help.stderr || ''}`;
+	return {
+		success: !version.error && version.status === 0,
+		bridge_features: {
+			chat: true,
+			images: true,
+			media_analysis: true,
+			structured_exec_json: /--json/.test(helpText),
+			output_schema: /--output-schema/.test(helpText),
+			image_attachments: /--image/.test(helpText),
+			app_server: !appServer.error && appServer.status === 0,
+		},
+		codex: {
+			binary: resolveCodexBinary(),
+			version: (version.stdout || version.stderr || '').trim(),
+			exec_help_available: !help.error && help.status === 0,
+			app_server_available: !appServer.error && appServer.status === 0,
+		},
+	};
+}
+
 module.exports = {
 	buildChatPrompt,
+	capabilities,
 	checkStatus,
 	chat,
 	codexImageFailureFromOutput,
+	codexJsonUnsupported,
 	images,
 	messagesToPrompt,
 	models,
+	parseCodexJsonEvents,
 	runCodexAsync,
+	runCodexExec,
 	resolveCodexBinary,
 };

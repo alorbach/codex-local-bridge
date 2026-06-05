@@ -81,6 +81,45 @@ Example response:
 
 Streams job-state updates as server-sent events for the local status page. This route does not require pairing and emits `jobs` events whose JSON payload matches the `jobs` object from `GET /v1/status`.
 
+## `GET /v1/capabilities`
+
+Returns capability metadata for the bridge, local Codex executable, optional video provider, and media analysis support. This route does not require pairing.
+
+Example response:
+
+```json
+{
+  "success": true,
+  "bridge": {
+    "version": "1.0.2"
+  },
+  "codex": {
+    "binary": "<path-to-codex-executable>",
+    "version": "codex-cli 0.137.0"
+  },
+  "features": {
+    "chat": true,
+    "images": true,
+    "media_analysis": true,
+    "structured_exec_json": true,
+    "output_schema": true,
+    "image_attachments": true,
+    "app_server": true
+  },
+  "video": {
+    "enabled": false,
+    "configured": false,
+    "provider": "openai-videos-api",
+    "models": ["sora-2", "sora-2-pro"]
+  },
+  "media_analysis": {
+    "enabled": true,
+    "provider": "local-codex-vision",
+    "ffmpeg_available": true
+  }
+}
+```
+
 ## `POST /v1/pair`
 
 Pairs a browser origin with the bridge.
@@ -239,6 +278,57 @@ Response:
 ```
 
 The bridge returns exactly one detected generated image. If Codex completes without creating a new image under `CODEX_HOME/generated_images`, the bridge returns `success: false`.
+
+When the installed Codex CLI supports `codex exec --json`, image and chat jobs use the structured event stream for cleaner progress and error details. If an older CLI rejects `--json`, the bridge reruns the job without structured events and preserves the legacy result shape.
+
+## `POST /v1/videos`
+
+Runs an optional OpenAI Videos API job. This route is disabled unless `ALORBACH_CODEX_ENABLE_VIDEO=1` and `ALORBACH_OPENAI_API_KEY` or `OPENAI_API_KEY` are configured. It is API-backed and not part of the user's local Codex allowance.
+
+Request:
+
+```json
+{
+  "job_token": "<wordpress-job-token>",
+  "request_hash": "<wordpress-request-hash>",
+  "request_id": "<wordpress-request-id>",
+  "payload": {
+    "action": "create",
+    "model": "sora-2",
+    "prompt": "A product teaser clip for a desktop bridge app.",
+    "size": "1280x720",
+    "seconds": "8",
+    "poll": true,
+    "download": false
+  }
+}
+```
+
+Supported `action` values are `create`, `retrieve`, `download`, `remix`, and `delete`. Create/remix responses may return queued or in-progress jobs unless `poll` is true. Downloads return base64 MP4 content in `response.b64_video` or `response.content.b64_video`.
+
+## `POST /v1/media/analyze`
+
+Analyzes bounded media frames through local Codex vision prompts. The safest input is a small array of image data URLs in `payload.frames`. The bridge can also download an HTTPS `media_url` and extract frames with `ffmpeg` when available. Local file paths, non-HTTPS URLs, localhost, and private-network URLs are rejected.
+
+Request:
+
+```json
+{
+  "job_token": "<wordpress-job-token>",
+  "request_hash": "<wordpress-request-hash>",
+  "request_id": "<wordpress-request-id>",
+  "payload": {
+    "model": "codex-local:auto",
+    "prompt": "Summarize this video for accessibility alt text.",
+    "frames": [
+      "data:image/png;base64,..."
+    ],
+    "transcript": "Optional supplied audio transcript."
+  }
+}
+```
+
+For `media_url` analysis, `ffmpeg` must be available on PATH. Audio transcription is not performed locally; pass a transcript when audio content matters.
 
 ## Error Shape
 

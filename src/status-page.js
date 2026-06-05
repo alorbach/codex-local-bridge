@@ -126,6 +126,33 @@ function statusPageHtml() {
 			color: var(--muted);
 		}
 		.help-list li { margin: 4px 0; }
+		.feature-grid {
+			display: grid;
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+			gap: 8px;
+		}
+		.feature-pill {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 10px;
+			min-width: 0;
+			background: var(--panel-2);
+			border: 1px solid var(--line);
+			border-radius: 6px;
+			padding: 9px 10px;
+		}
+		.feature-pill .name {
+			overflow-wrap: anywhere;
+		}
+		.feature-pill .state {
+			flex: 0 0 auto;
+			color: var(--muted);
+			font-size: 12px;
+			font-weight: 650;
+		}
+		.feature-pill.enabled .state { color: var(--ok); }
+		.feature-pill.disabled .state { color: var(--bad); }
 		.session-output-block {
 			min-width: 0;
 		}
@@ -215,6 +242,7 @@ function statusPageHtml() {
 			header { align-items: flex-start; flex-direction: column; }
 			.span-4,
 			.span-6 { grid-column: span 12; }
+			.feature-grid { grid-template-columns: 1fr; }
 			.table { display: block; overflow-x: auto; }
 		}
 	</style>
@@ -245,6 +273,18 @@ function statusPageHtml() {
 			<div class="panel span-6">
 				<div class="label">Max Parallel Jobs</div>
 				<div class="value" id="maxConcurrent">-</div>
+			</div>
+			<div class="panel span-6">
+				<div class="label">Codex CLI Version</div>
+				<div class="value" id="codexCliVersion">-</div>
+			</div>
+			<div class="panel span-6">
+				<div class="label">Codex Binary</div>
+				<div class="value"><code id="codexBinary">-</code></div>
+			</div>
+			<div class="panel span-12">
+				<div class="label">Detected Features</div>
+				<div class="feature-grid" id="detectedFeatures"></div>
 			</div>
 			<div class="panel span-12">
 				<div class="label">Active Jobs</div>
@@ -288,8 +328,10 @@ function statusPageHtml() {
 	</main>
 	<script>
 		const statusUrl = '/v1/status';
+		const capabilitiesUrl = '/v1/capabilities';
 		const jobEventsUrl = '/v1/status/events';
 		let currentStatus = {};
+		let currentCapabilities = {};
 		let fallbackPollTimer = null;
 		let jobEvents = null;
 		const fields = {
@@ -299,6 +341,9 @@ function statusPageHtml() {
 			jobCounts: document.getElementById('jobCounts'),
 			version: document.getElementById('version'),
 			maxConcurrent: document.getElementById('maxConcurrent'),
+			codexCliVersion: document.getElementById('codexCliVersion'),
+			codexBinary: document.getElementById('codexBinary'),
+			detectedFeatures: document.getElementById('detectedFeatures'),
 			activeJobs: document.getElementById('activeJobs'),
 			recentFailures: document.getElementById('recentFailures'),
 			pairedSites: document.getElementById('pairedSites'),
@@ -473,6 +518,45 @@ function statusPageHtml() {
 			return rows.map(([label, value]) => '<tr><th>' + escapeHtml(label) + '</th><td><code>' + escapeHtml(value) + '</code></td></tr>').join('');
 		}
 
+		function featureState(value) {
+			return value ? 'enabled' : 'disabled';
+		}
+
+		function featureLabel(value) {
+			return value ? 'Yes' : 'No';
+		}
+
+		function featurePill(name, value) {
+			const state = featureState(value);
+			return '<div class="feature-pill ' + state + '">' +
+				'<span class="name">' + escapeHtml(name) + '</span>' +
+				'<span class="state">' + featureLabel(value) + '</span>' +
+			'</div>';
+		}
+
+		function renderCapabilities(payload) {
+			currentCapabilities = payload || {};
+			const codex = currentCapabilities.codex || {};
+			const features = currentCapabilities.features || {};
+			const video = currentCapabilities.video || {};
+			const mediaAnalysis = currentCapabilities.media_analysis || {};
+			fields.codexCliVersion.textContent = text(codex.version);
+			fields.codexBinary.textContent = text(codex.binary);
+			fields.detectedFeatures.innerHTML = [
+				featurePill('Structured exec JSON', features.structured_exec_json),
+				featurePill('Output schema', features.output_schema),
+				featurePill('Image attachments', features.image_attachments),
+				featurePill('Codex app server', features.app_server),
+				featurePill('Local image generation', features.images),
+				featurePill('Media analysis route', mediaAnalysis.enabled),
+				featurePill('ffmpeg frame extraction', mediaAnalysis.ffmpeg_available),
+				featurePill('OpenAI video route', video.enabled),
+				featurePill('Video API configured', video.configured),
+			].join('');
+			currentStatus.capabilities = currentCapabilities;
+			fields.rawStatus.textContent = JSON.stringify(currentStatus, null, 2);
+		}
+
 		function captureSessionOutputScrolls() {
 			const states = new Map();
 			document.querySelectorAll('.session-output[data-session-key]').forEach((output) => {
@@ -562,6 +646,9 @@ function statusPageHtml() {
 
 		function renderStatus(payload, ok) {
 			currentStatus = payload;
+			if (Object.keys(currentCapabilities).length) {
+				currentStatus.capabilities = currentCapabilities;
+			}
 			const jobs = payload.jobs || {};
 			const bridge = payload.bridge || {};
 			const details = payload.details || {};
@@ -571,14 +658,25 @@ function statusPageHtml() {
 			fields.version.textContent = text(bridge.version);
 			fields.pairedSites.innerHTML = paired.length ? paired.map((origin) => '<code>' + escapeHtml(origin) + '</code>').join(' ') : '<span class="muted">None</span>';
 			fields.codexDetails.innerHTML = renderDetails(details);
+			if (!Object.keys(currentCapabilities).length) {
+				fields.codexCliVersion.textContent = text(details.version);
+				fields.codexBinary.textContent = text(details.codex_binary);
+				fields.detectedFeatures.innerHTML = '<div class="muted">Loading detected features</div>';
+			}
 			renderJobs(jobs);
 		}
 
 		async function refresh() {
 			try {
-				const response = await fetch(statusUrl, { cache: 'no-store' });
+				const [response, capabilitiesResponse] = await Promise.all([
+					fetch(statusUrl, { cache: 'no-store' }),
+					fetch(capabilitiesUrl, { cache: 'no-store' }).catch(() => null),
+				]);
 				const payload = await response.json();
 				renderStatus(payload, response.ok);
+				if (capabilitiesResponse && capabilitiesResponse.ok) {
+					renderCapabilities(await capabilitiesResponse.json());
+				}
 			} catch (error) {
 				renderStatus({ success: false, message: error.message, jobs: {} }, false);
 			}

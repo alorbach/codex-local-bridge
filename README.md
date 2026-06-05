@@ -18,6 +18,9 @@ Windows tray companion for Alorbach AI Subscription Gateway. It exposes a secure
 - Stores a per-origin bearer token in the user's bridge state directory.
 - Executes signed Gateway chat jobs through local `codex exec`.
 - Executes signed Gateway image jobs and returns normalized base64 image data.
+- Reports local bridge multimodal capabilities, including structured Codex event support and optional video/media features.
+- Optionally executes signed OpenAI Videos API jobs when explicitly configured with an API key and enable flag.
+- Optionally analyzes bounded media frames or HTTPS media URLs through local Codex vision prompts.
 - Runs local Codex jobs with bounded parallelism and queues overflow requests.
 - Shows bridge status, Codex login status, paired sites, diagnostics, restart, and unpair actions in the tray menu.
 - Opens a minimal local status page on tray icon double-click.
@@ -123,11 +126,14 @@ Routes:
 - `GET /status`: minimal visual bridge status page.
 - `GET /v1/status`: local bridge and Codex readiness.
 - `GET /v1/status/events`: local job-state event stream used by the status page.
+- `GET /v1/capabilities`: bridge, Codex, video, and media-analysis capability metadata.
 - `POST /v1/pair`: exchange tray pairing code for an origin token.
 - `POST /v1/unpair`: remove the pairing for the request origin.
 - `GET /v1/models`: list paired local model IDs.
 - `POST /v1/chat`: run a signed chat job.
 - `POST /v1/images`: run a signed image job.
+- `POST /v1/videos`: optionally run a signed OpenAI Videos API job.
+- `POST /v1/media/analyze`: analyze bounded media frames or an HTTPS media URL.
 
 Paired routes require:
 
@@ -193,6 +199,10 @@ The `/status` page auto-refreshes and shows bounded live Codex session output fo
 - `ALORBACH_CODEX_MAX_CONCURRENT_JOBS`: maximum parallel local Codex jobs. Default: `2`.
 - `ALORBACH_CODEX_CHAT_TIMEOUT_MS`: chat timeout. Default: `600000`.
 - `ALORBACH_CODEX_IMAGE_TIMEOUT_MS`: image timeout. Default: `1800000`.
+- `ALORBACH_CODEX_ENABLE_VIDEO`: set to `1` to enable the optional OpenAI Videos API route.
+- `ALORBACH_OPENAI_API_KEY` or `OPENAI_API_KEY`: API key for optional video generation.
+- `ALORBACH_VIDEO_POLL_TIMEOUT_MS`: optional video polling timeout. Default: `600000`.
+- `ALORBACH_VIDEO_POLL_INTERVAL_MS`: optional video polling interval. Default: `3000`.
 
 If Windows resolves `codex` to a problematic `.cmd` shim, set `ALORBACH_CODEX_BINARY` to the real executable path before starting the bridge.
 

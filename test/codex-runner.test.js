@@ -3,7 +3,7 @@
 process.env.ALORBACH_CODEX_BINARY = process.execPath;
 
 const assert = require('assert');
-const { codexImageFailureFromOutput, runCodexAsync } = require('../src/codex');
+const { codexImageFailureFromOutput, codexJsonUnsupported, parseCodexJsonEvents, runCodexAsync } = require('../src/codex');
 
 (async () => {
 	const input = `start\n${'x'.repeat(128 * 1024)}\nend`;
@@ -51,6 +51,21 @@ const { codexImageFailureFromOutput, runCodexAsync } = require('../src/codex');
 	assert.strictEqual(missingOutputFailure.message, 'Codex CLI completed, but no new generated image file was detected.');
 	assert.strictEqual(missingOutputFailure.details.stdout, 'No image created.');
 	assert.strictEqual(missingOutputFailure.details.generated_images_dir, '/tmp/generated_images');
+
+	const structured = parseCodexJsonEvents([
+		JSON.stringify({ type: 'thread.started', thread_id: 'thread-1' }),
+		JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'final answer' }, usage: { total_tokens: 123 } }),
+		JSON.stringify({ type: 'turn.failed', error: { message: 'model failed' } }),
+		'not json',
+	].join('\n'));
+	assert.strictEqual(structured.events.length, 3);
+	assert.deepStrictEqual(structured.finalMessages, ['final answer']);
+	assert.deepStrictEqual(structured.usage, { total_tokens: 123 });
+	assert.ok(structured.errors.includes('model failed'));
+	assert.deepStrictEqual(structured.invalidLines, ['not json']);
+
+	assert.strictEqual(codexJsonUnsupported({ status: 2, stderr: "error: unexpected argument '--json'" }), true);
+	assert.strictEqual(codexJsonUnsupported({ status: 1, stderr: 'model failed' }), false);
 
 	console.log('codex runner tests passed');
 })().catch((error) => {

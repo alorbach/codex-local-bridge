@@ -134,7 +134,12 @@ function createMockSecurity() {
 		assert.ok(page.contentType.includes('text/html'));
 		assert.ok(page.body.includes('Codex Local Bridge'));
 		assert.ok(page.body.includes('/v1/status'));
+		assert.ok(page.body.includes('/v1/capabilities'));
 		assert.ok(page.body.includes('/v1/status/events'));
+		assert.ok(page.body.includes('Codex CLI Version'));
+		assert.ok(page.body.includes('Detected Features'));
+		assert.ok(page.body.includes('Structured exec JSON'));
+		assert.ok(page.body.includes('OpenAI video route'));
 		assert.ok(page.body.includes('new EventSource(jobEventsUrl)'));
 		assert.ok(page.body.includes('startFallbackPolling'));
 		assert.ok(page.body.includes('<details class="panel span-12">'));

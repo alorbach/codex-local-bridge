@@ -4,8 +4,10 @@ const http = require('http');
 const codex = require('./codex');
 const { attachDebugHelp } = require('./debug-help');
 const { JobManager, clampMaxConcurrent } = require('./job-manager');
+const mediaAnalysis = require('./media-analysis');
 const security = require('./security');
 const { statusPageHtml } = require('./status-page');
+const video = require('./video');
 
 let pairingCode = security.createPairingCode();
 
@@ -97,17 +99,23 @@ function readBody(req, maxBytes) {
 	return new Promise((resolve, reject) => {
 		let body = '';
 		let size = 0;
+		let rejected = false;
 		req.setEncoding('utf8');
 		req.on('data', (chunk) => {
 			size += Buffer.byteLength(chunk, 'utf8');
 			if (size > maxBytes) {
-				reject(new Error('Request body is too large.'));
-				req.destroy();
+				if (!rejected) {
+					rejected = true;
+					reject(new Error('Request body is too large.'));
+				}
 				return;
 			}
 			body += chunk;
 		});
 		req.on('end', () => {
+			if (rejected) {
+				return;
+			}
 			if (!body.trim()) {
 				resolve({});
 				return;
@@ -145,6 +153,30 @@ function modelFromPayload(payload, fallback) {
 	return String((payload && payload.model) || fallback || 'codex-local:auto');
 }
 
+function capabilitiesPayload(context) {
+	const codexCapabilities = context.codex.capabilities ? context.codex.capabilities() : { success: true, bridge_features: {} };
+	return {
+		success: true,
+		bridge: {
+			version: require('../package.json').version,
+		},
+		codex: codexCapabilities.codex || {},
+		features: codexCapabilities.bridge_features || {},
+		video: context.video.capabilities ? context.video.capabilities() : { enabled: false },
+		media_analysis: context.mediaAnalysis.capabilities ? context.mediaAnalysis.capabilities() : { enabled: false },
+	};
+}
+
+function errorStatusForResult(result) {
+	if (result && result.category === 'validation') {
+		return 400;
+	}
+	if (result && result.category === 'configuration') {
+		return 503;
+	}
+	return 500;
+}
+
 async function route(req, res, context) {
 	const bridgeSecurity = context.security;
 	const codexAdapter = context.codex;
@@ -179,6 +211,11 @@ async function route(req, res, context) {
 		return;
 	}
 
+	if (req.method === 'GET' && url.pathname === '/v1/capabilities') {
+		sendJson(res, 200, capabilitiesPayload(context), origin || pairedOriginForCors(req, bridgeSecurity));
+		return;
+	}
+
 	if (req.method === 'GET' && url.pathname === '/v1/status/events') {
 		context.statusEvents.add(res, jobManager.snapshot());
 		return;
@@ -189,7 +226,12 @@ async function route(req, res, context) {
 		if (!pairedOrigin) {
 			return;
 		}
-		sendJson(res, 200, codexAdapter.models(), pairedOrigin);
+		const modelPayload = codexAdapter.models();
+		const videoCapabilities = context.video.capabilities ? context.video.capabilities() : { enabled: false, models: [] };
+		if (modelPayload && modelPayload.models && videoCapabilities.enabled) {
+			modelPayload.models.video = (videoCapabilities.models || []).map((id) => `openai-video:${id}`);
+		}
+		sendJson(res, 200, modelPayload, pairedOrigin);
 		return;
 	}
 
@@ -271,6 +313,32 @@ async function route(req, res, context) {
 		sendJson(res, 200, result, pairedOrigin);
 		return;
 	}
+	if (url.pathname === '/v1/videos') {
+		const result = await jobManager.run({
+			requestId: body.request_id,
+			type: 'videos',
+			model: modelFromPayload(body.payload, 'sora-2'),
+		}, (session) => context.video.run(body.payload || {}, session));
+		if (!result.success) {
+			sendErrorJson(req, res, errorStatusForResult(result), result, pairedOrigin, { requestId: body.request_id, route: '/v1/videos' });
+			return;
+		}
+		sendJson(res, 200, result, pairedOrigin);
+		return;
+	}
+	if (url.pathname === '/v1/media/analyze') {
+		const result = await jobManager.run({
+			requestId: body.request_id,
+			type: 'media_analysis',
+			model: modelFromPayload(body.payload, 'codex-local:auto'),
+		}, (session) => context.mediaAnalysis.analyze(body.payload || {}, codexAdapter, session));
+		if (!result.success) {
+			sendErrorJson(req, res, errorStatusForResult(result), result, pairedOrigin, { requestId: body.request_id, route: '/v1/media/analyze' });
+			return;
+		}
+		sendJson(res, 200, result, pairedOrigin);
+		return;
+	}
 	sendErrorJson(req, res, 404, { success: false, message: 'Unknown local bridge route.' }, pairedOrigin, { requestId: body.request_id });
 }
 
@@ -286,7 +354,9 @@ function createServer(options = {}) {
 	};
 	const context = {
 		codex: options.codex || codex,
+		mediaAnalysis: options.mediaAnalysis || mediaAnalysis,
 		security: options.security || security,
+		video: options.video || video,
 		jobManager: options.jobManager || createJobManager({ ...options, onJobState }),
 		statusEvents,
 	};
