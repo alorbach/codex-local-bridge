@@ -3,7 +3,7 @@
 process.env.ALORBACH_CODEX_BINARY = process.execPath;
 
 const assert = require('assert');
-const { runCodexAsync } = require('../src/codex');
+const { codexImageFailureFromOutput, runCodexAsync } = require('../src/codex');
 
 (async () => {
 	const input = `start\n${'x'.repeat(128 * 1024)}\nend`;
@@ -33,6 +33,24 @@ const { runCodexAsync } = require('../src/codex');
 	assert.strictEqual(payload.inputLength, input.length);
 	assert.strictEqual(payload.startsWith, 'start');
 	assert.strictEqual(payload.endsWith, 'end');
+
+	const rateLimitFailure = codexImageFailureFromOutput('', 'Image generation failed due to rate limiting.', 'C:\\Users\\AL\\.codex\\generated_images');
+	assert.strictEqual(rateLimitFailure.success, false);
+	assert.strictEqual(rateLimitFailure.code, 'codex_rate_limited');
+	assert.strictEqual(rateLimitFailure.category, 'rate_limit');
+	assert.strictEqual(rateLimitFailure.retryable, true);
+	assert.strictEqual(rateLimitFailure.message, 'Codex image generation was rate limited. Please wait and retry.');
+	assert.strictEqual(rateLimitFailure.details.stderr, 'Image generation failed due to rate limiting.');
+	assert.strictEqual(rateLimitFailure.details.generated_images_dir, 'C:\\Users\\AL\\.codex\\generated_images');
+
+	const missingOutputFailure = codexImageFailureFromOutput('No image created.', '', '/tmp/generated_images');
+	assert.strictEqual(missingOutputFailure.success, false);
+	assert.strictEqual(missingOutputFailure.code, 'codex_no_image_output');
+	assert.strictEqual(missingOutputFailure.category, 'output_detection');
+	assert.strictEqual(missingOutputFailure.retryable, false);
+	assert.strictEqual(missingOutputFailure.message, 'Codex CLI completed, but no new generated image file was detected.');
+	assert.strictEqual(missingOutputFailure.details.stdout, 'No image created.');
+	assert.strictEqual(missingOutputFailure.details.generated_images_dir, '/tmp/generated_images');
 
 	console.log('codex runner tests passed');
 })().catch((error) => {

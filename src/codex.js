@@ -204,6 +204,31 @@ function parseUsage(stdout, stderr) {
 	return { total_tokens: 0, local_unmetered: true };
 }
 
+function codexImageFailureFromOutput(stdout, stderr, generatedImagesPath = generatedImagesDir) {
+	const cleanStdout = String(stdout || '').trim();
+	const cleanStderr = String(stderr || '').trim();
+	const combined = `${cleanStdout}\n${cleanStderr}`;
+	const details = { generated_images_dir: generatedImagesPath, stdout: cleanStdout, stderr: cleanStderr };
+	if (/rate limit|rate-limit|rate limiting|too many requests/i.test(combined)) {
+		return {
+			success: false,
+			code: 'codex_rate_limited',
+			category: 'rate_limit',
+			retryable: true,
+			message: 'Codex image generation was rate limited. Please wait and retry.',
+			details,
+		};
+	}
+	return {
+		success: false,
+		code: 'codex_no_image_output',
+		category: 'output_detection',
+		retryable: false,
+		message: 'Codex CLI completed, but no new generated image file was detected.',
+		details,
+	};
+}
+
 function imageExtensionForMime(mime) {
 	const normalized = String(mime || '').toLowerCase();
 	if (normalized === 'image/jpeg' || normalized === 'image/jpg') {
@@ -477,10 +502,14 @@ async function images(payload, session = {}) {
 		return { success: false, message: 'Codex CLI could not be executed for image generation.', details: { error: run.error.message || String(run.error), stdout, stderr, status: run.status, signal: run.signal } };
 	}
 	if (run.status !== 0) {
-		return { success: false, message: 'Codex CLI image generation failed.', details: { stdout, stderr } };
+		const failure = codexImageFailureFromOutput(stdout, stderr);
+		if (failure.code === 'codex_rate_limited') {
+			return failure;
+		}
+		return { success: false, code: 'codex_cli_image_failed', category: 'codex_cli', message: 'Codex CLI image generation failed.', details: { stdout, stderr } };
 	}
 	if (!newImages.length) {
-		return { success: false, message: 'Codex CLI completed, but no new generated image file was detected.', details: { generated_images_dir: generatedImagesDir, stdout, stderr } };
+		return codexImageFailureFromOutput(stdout, stderr);
 	}
 	const bytes = fs.readFileSync(newImages[0].path);
 	return {
@@ -519,6 +548,7 @@ module.exports = {
 	buildChatPrompt,
 	checkStatus,
 	chat,
+	codexImageFailureFromOutput,
 	images,
 	messagesToPrompt,
 	models,
