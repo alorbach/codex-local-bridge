@@ -477,6 +477,100 @@ function tryWriteDataImage(value, tempDir, index) {
 	};
 }
 
+function mimeFromImagePath(filePath) {
+	const ext = path.extname(filePath).toLowerCase();
+	if (ext === '.jpg' || ext === '.jpeg') {
+		return 'image/jpeg';
+	}
+	if (ext === '.png') {
+		return 'image/png';
+	}
+	if (ext === '.webp') {
+		return 'image/webp';
+	}
+	if (ext === '.gif') {
+		return 'image/gif';
+	}
+	return '';
+}
+
+function tryCopyImagePath(filePath, tempDir, index) {
+	if (!tempDir) {
+		return null;
+	}
+	const resolved = path.resolve(String(filePath || '').trim());
+	if (!resolved || !fs.existsSync(resolved)) {
+		return null;
+	}
+	const mime = mimeFromImagePath(resolved);
+	if (!mime) {
+		return null;
+	}
+	const extension = imageExtensionForMime(mime);
+	if (extension === 'bin') {
+		return null;
+	}
+	let bytes;
+	try {
+		bytes = fs.readFileSync(resolved);
+	} catch (error) {
+		return null;
+	}
+	if (!bytes.length) {
+		return null;
+	}
+	const imagePath = path.join(tempDir, `input-image-${index}.${extension}`);
+	fs.writeFileSync(imagePath, bytes);
+	return {
+		bytes: bytes.length,
+		mime,
+		path: imagePath,
+		source_path: resolved,
+	};
+}
+
+function attachmentFromReferenceImage(entry, tempDir, index) {
+	const b64 = String(entry && entry.b64_json || '').trim();
+	if (!b64) {
+		return null;
+	}
+	const mime = String(entry.mime_type || 'image/jpeg').toLowerCase();
+	const dataUrl = `data:${mime};base64,${b64}`;
+	const attachment = tryWriteDataImage(dataUrl, tempDir, index);
+	if (!attachment) {
+		return null;
+	}
+	if (entry.label) {
+		attachment.label = String(entry.label);
+	}
+	return attachment;
+}
+
+function collectImageAttachments(payload, tempDir) {
+	const attachments = [];
+	const seen = new Set();
+
+	function push(attachment) {
+		if (!attachment || !attachment.path || seen.has(attachment.path.toLowerCase())) {
+			return;
+		}
+		seen.add(attachment.path.toLowerCase());
+		attachments.push(attachment);
+	}
+
+	for (const entry of Array.isArray(payload.reference_images) ? payload.reference_images : []) {
+		push(attachmentFromReferenceImage(entry, tempDir, attachments.length + 1));
+	}
+	for (const filePath of Array.isArray(payload.referenced_image_paths) ? payload.referenced_image_paths : []) {
+		push(tryCopyImagePath(filePath, tempDir, attachments.length + 1));
+	}
+	for (const frame of Array.isArray(payload.frames) ? payload.frames : []) {
+		push(tryWriteDataImage(frame, tempDir, attachments.length + 1));
+	}
+
+	return attachments;
+}
+
 function safeStringifyForPrompt(value) {
 	return JSON.stringify(value, (key, item) => {
 		if (typeof item === 'string' && /^data:image\/[a-z0-9.+-]+;base64,/i.test(item)) {
@@ -666,18 +760,33 @@ function detectNewImage(before, after) {
 	return after.filter((item) => !known.has(item.path.toLowerCase())).sort((a, b) => b.mtimeMs - a.mtimeMs);
 }
 
-function imagePrompt(payload) {
+function imagePrompt(payload, attachments = []) {
 	const prompt = String(payload.prompt || '').trim();
 	const size = String(payload.size || '1024x1024').trim();
 	const quality = String(payload.quality || 'high').trim();
-	return [
+	const lines = [
 		'Generate exactly one image using your built-in image generation tool.',
 		'Do not access unrelated local files or modify anything except generated image output.',
+	];
+	if (attachments.length) {
+		lines.push(
+			'Attached reference images are provided via --image flags. Use them as exact visual references; do not invent substitutes.',
+		);
+		for (let i = 0; i < attachments.length; i++) {
+			const label = attachments[i].label ? ` (${attachments[i].label})` : '';
+			lines.push(`- Image ${i + 1}${label}: exact reference from attachment ${i + 1}.`);
+		}
+		if (attachments.length >= 2) {
+			lines.push('- Merge products from Image 1 into the layout structure of Image 2 photorealistically.');
+		}
+	}
+	lines.push(
 		`User prompt: ${prompt}`,
 		`Requested size: ${size}`,
 		`Preferred quality: ${quality}`,
 		'After the image has been generated, reply with a short plain-text confirmation only.',
-	].join('\n');
+	);
+	return lines.join('\n');
 }
 
 async function images(payload, session = {}) {
@@ -693,6 +802,7 @@ async function images(payload, session = {}) {
 	const before = listGeneratedImages(generatedImagesDir);
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alorbach-codex-image-'));
 	const outputFile = path.join(tempDir, 'last-message.txt');
+	const attachments = collectImageAttachments(payload, tempDir);
 	const args = [
 		'exec',
 		'--skip-git-repo-check',
@@ -701,9 +811,12 @@ async function images(payload, session = {}) {
 		tempDir,
 		'--output-last-message',
 		outputFile,
-		'-',
 	];
-	const run = await runCodexExec(args, { cwd: tempDir, timeout: Number(process.env.ALORBACH_CODEX_IMAGE_TIMEOUT_MS || 1800000), onOutput: session.appendSessionOutput, input: imagePrompt(payload) });
+	for (const attachment of attachments) {
+		args.push('--image', attachment.path);
+	}
+	args.push('-');
+	const run = await runCodexExec(args, { cwd: tempDir, timeout: Number(process.env.ALORBACH_CODEX_IMAGE_TIMEOUT_MS || 1800000), onOutput: session.appendSessionOutput, input: imagePrompt(payload, attachments) });
 	const after = listGeneratedImages(generatedImagesDir);
 	const newImages = detectNewImage(before, after);
 	const stdout = (run.stdout || '').trim();
@@ -727,7 +840,14 @@ async function images(payload, session = {}) {
 		response: {
 			data: [{ b64_json: bytes.toString('base64') }],
 			usage: parseUsage(stdout, stderr, run.structured),
-			provider_details: { image_path: newImages[0].path, generated_images_dir: generatedImagesDir, structured_events: !!run.used_json, json_fallback_reason: run.json_fallback_reason || undefined },
+			provider_details: {
+				image_path: newImages[0].path,
+				generated_images_dir: generatedImagesDir,
+				structured_events: !!run.used_json,
+				json_fallback_reason: run.json_fallback_reason || undefined,
+				reference_attachment_count: attachments.length,
+				refs_forwarded_to_codex: attachments.length > 0,
+			},
 		},
 	};
 }
@@ -768,6 +888,7 @@ function capabilities() {
 			structured_exec_json: /--json/.test(helpText),
 			output_schema: /--output-schema/.test(helpText),
 			image_attachments: /--image/.test(helpText),
+			image_reference_attachments: true,
 			app_server: !appServer.error && appServer.status === 0,
 		},
 		codex: {
@@ -786,6 +907,8 @@ module.exports = {
 	chat,
 	codexImageFailureFromOutput,
 	codexJsonUnsupported,
+	collectImageAttachments,
+	imagePrompt,
 	images,
 	messagesToPrompt,
 	models,

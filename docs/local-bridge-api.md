@@ -123,7 +123,7 @@ Example response:
 {
   "success": true,
   "bridge": {
-    "version": "1.0.3"
+    "version": "1.0.4"
   },
   "codex": {
     "binary": "<path-to-codex-executable>",
@@ -136,6 +136,7 @@ Example response:
     "structured_exec_json": true,
     "output_schema": true,
     "image_attachments": true,
+    "image_reference_attachments": true,
     "app_server": true
   },
   "video": {
@@ -281,10 +282,19 @@ Request:
     "model": "codex-local:image",
     "prompt": "A product-style image of a small desktop bridge icon",
     "size": "1024x1024",
-    "quality": "high"
+    "quality": "high",
+    "reference_images": [
+      {
+        "b64_json": "<base64>",
+        "mime_type": "image/jpeg",
+        "label": "product"
+      }
+    ]
   }
 }
 ```
+
+Reference images may also be supplied as `referenced_image_paths` (local filesystem paths readable by the bridge process) or `frames` (data URLs). When present, the bridge writes them to a temp directory and passes each file to `codex exec --image` before the text prompt, matching the multimodal chat path.
 
 Response:
 
@@ -303,7 +313,9 @@ Response:
     },
     "provider_details": {
       "image_path": "<user-home>\\.codex\\generated_images\\...",
-      "generated_images_dir": "<user-home>\\.codex\\generated_images"
+      "generated_images_dir": "<user-home>\\.codex\\generated_images",
+      "reference_attachment_count": 1,
+      "refs_forwarded_to_codex": true
     }
   }
 }
