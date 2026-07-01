@@ -6,6 +6,7 @@ const { fork } = require('child_process');
 const { app, clipboard, Menu, nativeImage, shell, Tray } = require('electron');
 const packageInfo = require('../package.json');
 const codex = require('./codex');
+const { appendLog, safeError } = require('./diagnostics');
 const security = require('./security');
 
 let buildInfo = {};
@@ -121,6 +122,7 @@ function copyDiagnostics(status, pairedOrigins) {
 		paired_origins: pairedOrigins,
 		pairings: safePairings,
 		state_path: security.statePath,
+		log_path: appendLog('main', 'Diagnostics copied from tray.'),
 	}, null, 2));
 }
 
@@ -136,35 +138,60 @@ function stopBridge() {
 			clearTimeout(timeout);
 			resolve();
 		});
-		child.kill();
+		try {
+			child.kill();
+		} catch (error) {
+			appendLog('main', 'Bridge server kill failed during stop.', { error: safeError(error) });
+			clearTimeout(timeout);
+			resolve();
+		}
 	});
 }
 
 function startBridge() {
 	return new Promise((resolve) => {
+		let settled = false;
+		function finish() {
+			if (!settled) {
+				settled = true;
+				resolve();
+			}
+		}
 		bridgeState = 'Starting';
 		lastServerError = '';
 		refreshTray();
 		const serverScript = path.join(__dirname, 'server.js');
-		const child = fork(serverScript, [`--port=${serverPort}`], {
-			env: {
-				...process.env,
-				ELECTRON_RUN_AS_NODE: '1',
-			},
-			stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-		});
+		let child;
+		try {
+			child = fork(serverScript, [`--port=${serverPort}`], {
+				env: {
+					...process.env,
+					ELECTRON_RUN_AS_NODE: '1',
+				},
+				stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+			});
+		} catch (error) {
+			lastServerError = error && error.message ? error.message : String(error);
+			bridgeState = 'Failed';
+			appendLog('main', 'Bridge server fork failed.', { error: safeError(error) });
+			refreshTray();
+			finish();
+			return;
+		}
 		serverProcess = child;
 
-		child.stdout.on('data', (chunk) => {
+		if (child.stdout) child.stdout.on('data', (chunk) => {
 			const text = String(chunk || '').trim();
 			if (text) {
 				lastServerError = '';
+				appendLog('main', 'Bridge server stdout.', { output: text.slice(-4000) });
 			}
 		});
-		child.stderr.on('data', (chunk) => {
+		if (child.stderr) child.stderr.on('data', (chunk) => {
 			const text = String(chunk || '').trim();
 			if (text) {
 				lastServerError = text;
+				appendLog('main', 'Bridge server stderr.', { output: text.slice(-4000) });
 			}
 		});
 		child.on('message', (message) => {
@@ -176,14 +203,16 @@ function startBridge() {
 				currentPairingCode = String(message.pairingCode || currentPairingCode || '');
 				bridgeState = 'Running';
 				refreshTray();
-				resolve();
+				finish();
 			} else if (message.type === 'pairing-code') {
 				currentPairingCode = String(message.pairingCode || currentPairingCode || '');
 				refreshTray();
 			} else if (message.type === 'error') {
 				lastServerError = String(message.message || '');
 				bridgeState = 'Failed';
+				appendLog('main', 'Bridge server reported an error.', { message: lastServerError });
 				refreshTray();
+				finish();
 			} else if (message.type === 'job-state') {
 				jobState = {
 					running_count: Number(message.jobs && message.jobs.running_count) || 0,
@@ -196,13 +225,26 @@ function startBridge() {
 				refreshTray();
 			}
 		});
+		child.once('error', (error) => {
+			if (serverProcess === child) {
+				serverProcess = null;
+			}
+			lastServerError = error && error.message ? error.message : String(error);
+			bridgeState = 'Failed';
+			appendLog('main', 'Bridge server child process error.', { error: safeError(error) });
+			refreshTray();
+			finish();
+		});
 		child.once('exit', (code) => {
 			if (serverProcess === child) {
 				serverProcess = null;
 				bridgeState = code === 0 ? 'Stopped' : 'Stopped unexpectedly';
+				if (code !== 0) {
+					appendLog('main', 'Bridge server stopped unexpectedly.', { exit_code: code });
+				}
 				refreshTray();
 			}
-			resolve();
+			finish();
 		});
 	});
 }
@@ -430,21 +472,51 @@ function refreshTray() {
 }
 
 async function boot() {
-	tray = new Tray(trayIcon('idle'));
-	tray.on('double-click', () => openStatusPage());
-	refreshTray();
-	await startBridge();
-	refreshCodexStatus();
-	setInterval(refreshCodexStatus, 60000).unref();
-	setInterval(refreshTray, 15000).unref();
+	try {
+		tray = new Tray(trayIcon('idle'));
+		tray.on('double-click', () => openStatusPage());
+		refreshTray();
+		await startBridge();
+		refreshCodexStatus();
+		setInterval(refreshCodexStatus, 60000).unref();
+		setInterval(refreshTray, 15000).unref();
+	} catch (error) {
+		lastServerError = error && error.message ? error.message : String(error);
+		bridgeState = 'Failed';
+		appendLog('main', 'Bridge tray boot failed.', { error: safeError(error) });
+		refreshTray();
+	}
 }
 
-app.whenReady().then(boot);
+app.whenReady().then(boot).catch((error) => {
+	lastServerError = error && error.message ? error.message : String(error);
+	bridgeState = 'Failed';
+	appendLog('main', 'Electron app readiness failed.', { error: safeError(error) });
+	refreshTray();
+});
+
+process.on('uncaughtException', (error) => {
+	appendLog('main', 'Uncaught exception in tray process.', { error: safeError(error) });
+	lastServerError = error && error.message ? error.message : String(error);
+	bridgeState = 'Failed';
+	refreshTray();
+});
+
+process.on('unhandledRejection', (reason) => {
+	appendLog('main', 'Unhandled rejection in tray process.', { error: safeError(reason) });
+	lastServerError = reason && reason.message ? reason.message : String(reason);
+	bridgeState = 'Failed';
+	refreshTray();
+});
 
 app.on('before-quit', () => {
 	stopTrayAnimation();
 	if (serverProcess) {
-		serverProcess.kill();
+		try {
+			serverProcess.kill();
+		} catch (error) {
+			appendLog('main', 'Bridge server kill failed during quit.', { error: safeError(error) });
+		}
 		serverProcess = null;
 	}
 });

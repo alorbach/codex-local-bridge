@@ -4,6 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
+const { appendLog, createBoundedCollector, safeError } = require('./diagnostics');
 const security = require('./security');
 
 const MODEL_PREFIX = 'codex-local:audio';
@@ -563,8 +564,12 @@ function resolveModelPath(model, repoId, allowDownload) {
 function runAsync(command, args, options = {}) {
 	const onOutput = typeof options.onOutput === 'function' ? options.onOutput : () => {};
 	return new Promise((resolve) => {
-		let stdout = '';
-		let stderr = '';
+		const stdoutCollector = createBoundedCollector({
+			maxChars: Number(process.env.ALORBACH_ASR_OUTPUT_MAX_CHARS || 1024 * 1024),
+		});
+		const stderrCollector = createBoundedCollector({
+			maxChars: Number(process.env.ALORBACH_ASR_OUTPUT_MAX_CHARS || 1024 * 1024),
+		});
 		let spawnError = null;
 		let timedOut = false;
 		let child;
@@ -577,7 +582,8 @@ function runAsync(command, args, options = {}) {
 				env: { ...process.env, ...(options.env || {}) },
 			});
 		} catch (error) {
-			resolve({ stdout, stderr, status: null, signal: null, error });
+			appendLog('server', 'ASR child process spawn failed.', { error: safeError(error), command, args });
+			resolve({ stdout: '', stderr: '', status: null, signal: null, error });
 			return;
 		}
 		if (options.input && child.stdin) {
@@ -592,12 +598,12 @@ function runAsync(command, args, options = {}) {
 		}
 		child.stdout.on('data', (chunk) => {
 			const text = String(chunk || '');
-			stdout += text;
+			stdoutCollector.append(text);
 			onOutput('stdout', text);
 		});
 		child.stderr.on('data', (chunk) => {
 			const text = String(chunk || '');
-			stderr += text;
+			stderrCollector.append(text);
 			onOutput('stderr', text);
 		});
 		child.once('error', (error) => {
@@ -606,6 +612,18 @@ function runAsync(command, args, options = {}) {
 		child.once('close', (status, signal) => {
 			if (timer) {
 				clearTimeout(timer);
+			}
+			const stdout = stdoutCollector.value();
+			const stderr = stderrCollector.value();
+			const stdoutStats = stdoutCollector.stats();
+			const stderrStats = stderrCollector.stats();
+			if (stdoutStats.truncated_chars || stderrStats.truncated_chars) {
+				appendLog('server', 'ASR child process output was truncated.', {
+					stdout: stdoutStats,
+					stderr: stderrStats,
+					status,
+					signal,
+				});
 			}
 			resolve({ stdout, stderr, status, signal, error: spawnError || (timedOut ? new Error('Local Whisper execution timed out.') : null) });
 		});

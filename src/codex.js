@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 const asr = require('./asr');
+const { appendLog, createBoundedCollector, safeError } = require('./diagnostics');
 
 const codexBinary = process.env.ALORBACH_CODEX_BINARY || 'codex';
 const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
@@ -73,6 +74,7 @@ function runCodex(args, options = {}) {
 	return spawnSync(resolveCodexBinary(), args, {
 		encoding: 'utf8',
 		shell: false,
+		timeout: Number(process.env.ALORBACH_CODEX_STATUS_TIMEOUT_MS || 15000),
 		env: {
 			...process.env,
 			CODEX_HOME: codexHome,
@@ -87,8 +89,12 @@ function runCodexAsync(args, options = {}) {
 	const stdinInput = typeof input === 'string' || Buffer.isBuffer(input) ? input : null;
 	return new Promise((resolve) => {
 		let child;
-		let stdout = '';
-		let stderr = '';
+		const stdoutCollector = createBoundedCollector({
+			maxChars: Number(process.env.ALORBACH_CODEX_OUTPUT_MAX_CHARS || 1024 * 1024),
+		});
+		const stderrCollector = createBoundedCollector({
+			maxChars: Number(process.env.ALORBACH_CODEX_OUTPUT_MAX_CHARS || 1024 * 1024),
+		});
 		let spawnError = null;
 		let timedOut = false;
 		try {
@@ -103,7 +109,8 @@ function runCodexAsync(args, options = {}) {
 				...spawnOptions,
 			});
 		} catch (error) {
-			resolve({ stdout, stderr, status: null, signal: null, error });
+			appendLog('server', 'Codex CLI spawn failed.', { error: safeError(error), args });
+			resolve({ stdout: '', stderr: '', status: null, signal: null, error });
 			return;
 		}
 		if (stdinInput !== null && child.stdin) {
@@ -123,12 +130,12 @@ function runCodexAsync(args, options = {}) {
 		}
 		child.stdout.on('data', (chunk) => {
 			const text = String(chunk || '');
-			stdout += text;
+			stdoutCollector.append(text);
 			emitOutput('stdout', text);
 		});
 		child.stderr.on('data', (chunk) => {
 			const text = String(chunk || '');
-			stderr += text;
+			stderrCollector.append(text);
 			emitOutput('stderr', text);
 		});
 		child.once('error', (error) => {
@@ -137,6 +144,18 @@ function runCodexAsync(args, options = {}) {
 		child.once('close', (status, signal) => {
 			if (timer) {
 				clearTimeout(timer);
+			}
+			const stdout = stdoutCollector.value();
+			const stderr = stderrCollector.value();
+			const stdoutStats = stdoutCollector.stats();
+			const stderrStats = stderrCollector.stats();
+			if (stdoutStats.truncated_chars || stderrStats.truncated_chars) {
+				appendLog('server', 'Codex CLI output was truncated.', {
+					stdout: stdoutStats,
+					stderr: stderrStats,
+					status,
+					signal,
+				});
 			}
 			resolve({
 				stdout,

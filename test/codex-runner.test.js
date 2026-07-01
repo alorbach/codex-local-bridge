@@ -34,6 +34,27 @@ const { codexImageFailureFromOutput, codexJsonUnsupported, parseCodexJsonEvents,
 	assert.strictEqual(payload.startsWith, 'start');
 	assert.strictEqual(payload.endsWith, 'end');
 
+	const oldOutputLimit = process.env.ALORBACH_CODEX_OUTPUT_MAX_CHARS;
+	process.env.ALORBACH_CODEX_OUTPUT_MAX_CHARS = '2048';
+	try {
+		const noisyScript = [
+			"process.stdout.write('start-' + 'x'.repeat(8192) + '-end');",
+		].join('');
+		const noisy = await runCodexAsync(['-e', noisyScript], { timeout: 5000 });
+		assert.strictEqual(noisy.status, 0);
+		assert.ifError(noisy.error);
+		assert.ok(noisy.stdout.startsWith('start-'));
+		assert.ok(noisy.stdout.endsWith('-end'));
+		assert.ok(noisy.stdout.includes('[truncated'));
+		assert.ok(noisy.stdout.length < 2300);
+	} finally {
+		if (oldOutputLimit === undefined) {
+			delete process.env.ALORBACH_CODEX_OUTPUT_MAX_CHARS;
+		} else {
+			process.env.ALORBACH_CODEX_OUTPUT_MAX_CHARS = oldOutputLimit;
+		}
+	}
+
 	const rateLimitFailure = codexImageFailureFromOutput('', 'Image generation failed due to rate limiting.', 'C:\\Users\\AL\\.codex\\generated_images');
 	assert.strictEqual(rateLimitFailure.success, false);
 	assert.strictEqual(rateLimitFailure.code, 'codex_rate_limited');

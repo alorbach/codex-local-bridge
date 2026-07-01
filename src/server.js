@@ -9,6 +9,7 @@ const security = require('./security');
 const { statusPageHtml } = require('./status-page');
 const video = require('./video');
 const packageInfo = require('../package.json');
+const { appendLog, safeError, safeProcessSend } = require('./diagnostics');
 
 let pairingCode = security.createPairingCode();
 
@@ -17,15 +18,11 @@ function maxConcurrentJobs() {
 }
 
 function sendJobState(jobManager) {
-	if (process.send) {
-		process.send({ type: 'job-state', jobs: jobManager.snapshot() });
-	}
+	safeProcessSend({ type: 'job-state', jobs: jobManager.snapshot() }, { logName: 'server' });
 }
 
 function sendJobStateSnapshot(snapshot) {
-	if (process.send) {
-		process.send({ type: 'job-state', jobs: snapshot });
-	}
+	safeProcessSend({ type: 'job-state', jobs: snapshot }, { logName: 'server' });
 }
 
 function sseHeaders(origin = '') {
@@ -46,18 +43,43 @@ function sseHeaders(origin = '') {
 
 function createStatusEvents() {
 	const clients = new Set();
+	function remove(client, reason = '') {
+		if (!client || client.closed) {
+			return;
+		}
+		client.closed = true;
+		if (client.heartbeatTimer) {
+			clearInterval(client.heartbeatTimer);
+			client.heartbeatTimer = null;
+		}
+		clients.delete(client);
+		if (reason) {
+			appendLog('server', 'Status event stream closed.', { reason });
+		}
+	}
 	return {
 		add(res, options = {}) {
 			const client = {
 				res,
 				events: new Set(options.events || ['jobs']),
 				heartbeatTimer: null,
+				closed: false,
 			};
 			clients.add(client);
-			res.writeHead(200, sseHeaders(options.origin || ''));
-			res.write('retry: 3000\n\n');
+			res.on('close', () => remove(client));
+			res.on('error', (error) => remove(client, error && error.message ? error.message : 'response error'));
+			try {
+				res.writeHead(200, sseHeaders(options.origin || ''));
+				res.write('retry: 3000\n\n');
+			} catch (error) {
+				remove(client, error && error.message ? error.message : 'initial write failed');
+				return;
+			}
 			for (const [event, payload] of options.initialEvents || []) {
 				this.send(client, event, payload);
+			}
+			if (client.closed) {
+				return;
 			}
 			client.heartbeatTimer = setInterval(() => {
 				this.send(client, 'heartbeat', { time: new Date().toISOString() });
@@ -65,12 +87,6 @@ function createStatusEvents() {
 			if (typeof client.heartbeatTimer.unref === 'function') {
 				client.heartbeatTimer.unref();
 			}
-			res.on('close', () => {
-				if (client.heartbeatTimer) {
-					clearInterval(client.heartbeatTimer);
-				}
-				clients.delete(client);
-			});
 		},
 		broadcast(event, payload) {
 			for (const client of clients) {
@@ -81,8 +97,23 @@ function createStatusEvents() {
 			if (!client.events.has(event) && event !== 'heartbeat') {
 				return;
 			}
-			client.res.write(`event: ${event}\n`);
-			client.res.write(`data: ${JSON.stringify(payload)}\n\n`);
+			if (client.closed || client.res.destroyed || client.res.writableEnded) {
+				remove(client);
+				return;
+			}
+			let data;
+			try {
+				data = JSON.stringify(payload);
+			} catch (error) {
+				appendLog('server', 'Status event payload could not be serialized.', { event, error: safeError(error) });
+				return;
+			}
+			try {
+				client.res.write(`event: ${event}\n`);
+				client.res.write(`data: ${data}\n\n`);
+			} catch (error) {
+				remove(client, error && error.message ? error.message : 'write failed');
+			}
 		},
 	};
 }
@@ -332,9 +363,7 @@ async function route(req, res, context) {
 		const token = bridgeSecurity.createToken();
 		bridgeSecurity.savePairing(safeOrigin, token);
 		pairingCode = bridgeSecurity.createPairingCode();
-		if (process.send) {
-			process.send({ type: 'pairing-code', pairingCode });
-		}
+		safeProcessSend({ type: 'pairing-code', pairingCode }, { logName: 'server' });
 		sendJson(res, 200, { success: true, origin: safeOrigin, token }, safeOrigin);
 		return;
 	}
@@ -459,7 +488,18 @@ function createServer(options = {}) {
 	};
 	const server = http.createServer((req, res) => {
 		route(req, res, context).catch((error) => {
-			sendErrorJson(req, res, 500, { success: false, message: error && error.message ? error.message : 'Unexpected bridge failure.' }, exposeOrigin(req, context.security));
+			appendLog('server', 'Unhandled route failure.', {
+				error: safeError(error),
+				url: req.url,
+				method: req.method,
+			});
+			try {
+				if (!res.headersSent && !res.destroyed && !res.writableEnded) {
+					sendErrorJson(req, res, 500, { success: false, message: error && error.message ? error.message : 'Unexpected bridge failure.' }, exposeOrigin(req, context.security));
+				}
+			} catch (sendError) {
+				appendLog('server', 'Failed to send route error response.', { error: safeError(sendError) });
+			}
 		});
 	});
 	server.jobManager = context.jobManager;
@@ -488,15 +528,12 @@ if (require.main === module) {
 	const portArg = process.argv.find((arg) => arg.indexOf('--port=') === 0);
 	const port = portArg ? Number(portArg.replace('--port=', '')) : undefined;
 	startServer({ port }).then((result) => {
-		if (process.send) {
-			process.send({ type: 'ready', port: result.port, pairingCode });
-		}
+		safeProcessSend({ type: 'ready', port: result.port, pairingCode }, { logName: 'server' });
 		process.stdout.write(`Codex Local Bridge listening on http://127.0.0.1:${result.port}\n`);
 		process.stdout.write(`Pairing code: ${pairingCode}\n`);
 	}).catch((error) => {
-		if (process.send) {
-			process.send({ type: 'error', message: error && error.message ? error.message : String(error) });
-		}
+		appendLog('server', 'Server failed to start.', { error: safeError(error) });
+		safeProcessSend({ type: 'error', message: error && error.message ? error.message : String(error) }, { logName: 'server' });
 		process.stderr.write((error && error.message ? error.message : String(error)) + '\n');
 		process.exit(1);
 	});
@@ -504,6 +541,7 @@ if (require.main === module) {
 
 module.exports = {
 	createServer,
+	createStatusEvents,
 	createJobManager,
 	getPairingCode: () => pairingCode,
 	startServer,

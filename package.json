@@ -9,7 +9,7 @@
     "start": "electron .",
     "serve": "node src/server.js",
     "example:http": "node examples/http-app/server.js",
-    "test": "node test/security.test.js && node test/job-manager.test.js && node test/codex-runner.test.js && node test/codex-prompt.test.js && node test/image-attachments.test.js && node test/asr.test.js && node test/server-jobs.test.js && node test/transcribe.test.js && node test/multimodal.test.js",
+    "test": "node test/security.test.js && node test/job-manager.test.js && node test/diagnostics.test.js && node test/codex-runner.test.js && node test/codex-prompt.test.js && node test/image-attachments.test.js && node test/asr.test.js && node test/server-jobs.test.js && node test/transcribe.test.js && node test/multimodal.test.js",
     "smoke": "node src/server.js --check",
     "dist:win": "npm run icons && node scripts/build-win.js"
   },
